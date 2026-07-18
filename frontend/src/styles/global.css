@@ -1,0 +1,203 @@
+/* ============ Reset & Base ============ */
+*,
+*::before,
+*::after {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html {
+  font-size: 16px;
+  scroll-behavior: smooth;
+}
+
+body {
+  font-family: 'Noto Sans SC', -apple-system, BlinkMacSystemFont, 'Segoe UI',
+    'Helvetica Neue', sans-serif;
+  color: var(--text-primary);
+  background: var(--bg-deep);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+
+a {
+  text-decoration: none;
+  color: inherit;
+}
+
+ul, ol {
+  list-style: none;
+}
+
+button {
+  cursor: pointer;
+  border: none;
+  outline: none;
+  font-family: inherit;
+}
+
+input, select {
+  outline: none;
+  border: none;
+  font-family: inherit;
+}
+
+/* ============ CSS Variables — Neo-Tokyo ============ */
+:root {
+  /* Backgrounds */
+  --bg-deep: #070b16;
+  --bg-surface: #0f1623;
+  --bg-card: rgba(15, 22, 35, 0.75);
+  --bg-elevated: rgba(24, 34, 52, 0.65);
+
+  /* Accent — Neon */
+  --neon-cyan: #00e5ff;
+  --neon-cyan-dim: rgba(0, 229, 255, 0.55);
+  --neon-cyan-ghost: rgba(0, 229, 255, 0.08);
+  --neon-pink: #ff4d8d;
+  --neon-pink-dim: rgba(255, 77, 141, 0.55);
+  --neon-lime: #b8ff57;
+  --neon-amber: #ffb547;
+
+  /* Sentiment */
+  --color-positive: #00e5a0;
+  --color-negative: #ff4d6a;
+  --color-neutral: #8b95a5;
+
+  /* Text */
+  --text-primary: #edf1f7;
+  --text-secondary: #8a96aa;
+  --text-muted: #546070;
+
+  /* Borders & effects */
+  --border-color: rgba(255, 255, 255, 0.06);
+  --border-subtle: rgba(255, 255, 255, 0.04);
+  --glow-cyan: 0 0 20px rgba(0, 229, 255, 0.18);
+  --glow-cyan-strong: 0 0 40px rgba(0, 229, 255, 0.28), 0 0 80px rgba(0, 229, 255, 0.08);
+  --glow-pink: 0 0 20px rgba(255, 77, 141, 0.18);
+  --glass-border: 1px solid rgba(255, 255, 255, 0.07);
+  --glass-border-top: 1px solid rgba(255, 255, 255, 0.12);
+  --glass-shadow: 0 8px 32px rgba(0, 0, 0, 0.4), 0 2px 8px rgba(0, 0, 0, 0.2);
+  --glass-shadow-lg: 0 16px 64px rgba(0, 0, 0, 0.5), 0 4px 16px rgba(0, 0, 0, 0.25);
+
+  /* Card gradient */
+  --gradient-card: linear-gradient(135deg, rgba(0, 229, 255, 0.04) 0%, transparent 60%);
+  --gradient-card-hover: linear-gradient(135deg, rgba(0, 229, 255, 0.08) 0%, rgba(255, 77, 141, 0.04) 100%);
+
+  /* Radii & transitions */
+  --radius-sm: 8px;
+  --radius-md: 14px;
+  --radius-lg: 22px;
+  --transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-fast: all 0.15s ease;
+  --transition-spring: all 0.5s cubic-bezier(0.16, 1, 0.3, 1);
+
+  /* Fonts */
+  --font-display: 'Orbitron', sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+}
+
+/* ============ Scrollbar ============ */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(0, 229, 255, 0.15);
+  border-radius: 3px;
+  transition: background 0.2s;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 229, 255, 0.4);
+}
+
+/* ============ Loading Spinner ============ */
+.loading-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 60px 0;
+  gap: 16px;
+}
+
+.spinner {
+  width: 36px;
+  height: 36px;
+  border: 2px solid rgba(255, 255, 255, 0.06);
+  border-top-color: var(--neon-cyan);
+  border-right-color: rgba(0, 229, 255, 0.3);
+  border-radius: 50%;
+  animation: spin 0.75s linear infinite;
+  box-shadow: 0 0 16px rgba(0, 229, 255, 0.25);
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.loading-text {
+  color: var(--text-secondary);
+  font-size: 13px;
+  letter-spacing: 1px;
+  font-family: var(--font-mono);
+}
+
+/* ============ Utility ============ */
+.glass {
+  background: var(--bg-card);
+  backdrop-filter: blur(20px) saturate(1.3);
+  -webkit-backdrop-filter: blur(20px) saturate(1.3);
+  border: var(--glass-border);
+  border-top: var(--glass-border-top);
+  box-shadow: var(--glass-shadow);
+}
+
+/* ============ Stagger animation ============ */
+@keyframes fadeSlideUp {
+  from {
+    opacity: 0;
+    transform: translateY(28px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.stagger-item {
+  opacity: 0;
+  animation: fadeSlideUp 0.55s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+/* ============ Noise texture overlay ============ */
+.noise-overlay::after {
+  content: '';
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 9999;
+  opacity: 0.025;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* ============ Fade Transition ============ */
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.3s ease;
+}
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+}

@@ -1,0 +1,10 @@
+name: recommendation
+version: rag-v1
+role: Anime recommendation agent
+rules:
+  - Recommend from local candidates only.
+  - Use RAG evidence and user preferences.
+  - Cite doc_id values in evidence_refs.
+  - Ask a clarifying question when preference is insufficient.
+output: RecommendationResponseSchema
+
