@@ -7,8 +7,10 @@ import json
 import logging
 import time
 from typing import Iterable
+from sqlalchemy import select
 
-from backend.database import get_all_anime, get_aspect_sentiment, get_db, get_sentiment_stats, get_sentiment_trend, get_topics
+from backend.database import get_all_anime, get_aspect_sentiment, get_sentiment_stats, get_sentiment_trend, get_topics, orm_session
+from backend.db.models import Comment
 from backend.rag.embeddings import EMBEDDING_MODEL, EMBEDDING_PROVIDER, EmbeddingClient, stable_content_hash
 from backend.rag.storage import set_active_collection, set_collection_metadata, update_index_job, upsert_documents
 from backend.rag.vector_store import ChromaVectorStore
@@ -92,16 +94,21 @@ def build_documents(anime_id: int | None = None, comment_limit_per_anime: int = 
 
 
 def _comment_documents(anime_id: int, anime_name: str, platform: str, limit: int) -> Iterable[dict]:
-    conn = get_db()
-    rows = conn.execute(
-        """SELECT id, content, sentiment_label, sentiment_score, likes, platform, publish_time
-           FROM comments
-           WHERE anime_id = ? AND content != ''
-           ORDER BY likes DESC, id ASC
-           LIMIT ?""",
-        (anime_id, limit),
-    ).fetchall()
-    conn.close()
+    with orm_session() as session:
+        rows = session.execute(
+            select(
+                Comment.id,
+                Comment.content,
+                Comment.sentiment_label,
+                Comment.sentiment_score,
+                Comment.likes,
+                Comment.platform,
+                Comment.publish_time,
+            )
+            .where(Comment.anime_id == anime_id, Comment.content != "")
+            .order_by(Comment.likes.desc(), Comment.id)
+            .limit(limit)
+        ).mappings().all()
     for row in rows:
         metadata = {
             "anime_id": anime_id,
@@ -111,7 +118,7 @@ def _comment_documents(anime_id: int, anime_name: str, platform: str, limit: int
             "sentiment_score": row["sentiment_score"] or 0,
             "likes": row["likes"] or 0,
             "platform": row["platform"] or platform or "",
-            "publish_time": row["publish_time"] or "",
+            "publish_time": str(row["publish_time"] or ""),
         }
         yield _doc(
             f"anime:{anime_id}:comment:{row['id']}",

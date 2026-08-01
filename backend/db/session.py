@@ -7,11 +7,14 @@ from functools import lru_cache
 from pathlib import Path
 from typing import AsyncIterator, Iterator
 
-from sqlalchemy import Engine, create_engine
+from sqlalchemy import Engine, create_engine, event
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from backend.config import ASYNC_DATABASE_URL, DATABASE_URL
+
+_SYNC_ENGINES: set[Engine] = set()
+_ASYNC_ENGINES: set[AsyncEngine] = set()
 
 
 def sqlite_sync_url(path: str) -> str:
@@ -52,12 +55,28 @@ def _async_engine_options(url: str) -> dict:
 
 @lru_cache(maxsize=16)
 def _sync_engine(url: str) -> Engine:
-    return create_engine(url, future=True, **_sync_engine_options(url))
+    engine = create_engine(url, future=True, **_sync_engine_options(url))
+    if url.startswith("sqlite+"):
+        @event.listens_for(engine, "connect")
+        def _enable_sqlite_foreign_keys(dbapi_connection, _connection_record):
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.close()
+    _SYNC_ENGINES.add(engine)
+    return engine
 
 
 @lru_cache(maxsize=16)
 def _async_engine(url: str) -> AsyncEngine:
-    return create_async_engine(url, future=True, **_async_engine_options(url))
+    engine = create_async_engine(url, future=True, **_async_engine_options(url))
+    if url.startswith("sqlite+"):
+        @event.listens_for(engine.sync_engine, "connect")
+        def _enable_sqlite_foreign_keys(dbapi_connection, _connection_record):
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.close()
+    _ASYNC_ENGINES.add(engine)
+    return engine
 
 
 def get_sync_engine(*, db_path: str | None = None, url: str | None = None) -> Engine:
@@ -102,12 +121,21 @@ async def get_async_session() -> AsyncIterator[AsyncSession]:
     async with factory() as session:
         try:
             yield session
+            await session.commit()
         except Exception:
             await session.rollback()
             raise
 
 
-def clear_engine_caches() -> None:
-    """Clear factories after test configuration changes."""
+def dispose_sync_engines() -> None:
+    for engine in tuple(_SYNC_ENGINES):
+        engine.dispose()
+    _SYNC_ENGINES.clear()
     _sync_engine.cache_clear()
+
+
+async def dispose_async_engines() -> None:
+    for engine in tuple(_ASYNC_ENGINES):
+        await engine.dispose()
+    _ASYNC_ENGINES.clear()
     _async_engine.cache_clear()

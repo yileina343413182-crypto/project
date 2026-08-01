@@ -25,6 +25,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.mysql import LONGTEXT
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.types import TypeDecorator
 
 
 NAMING_CONVENTION = {
@@ -42,6 +43,44 @@ MYSQL_TABLE_OPTIONS = {
 LONG_TEXT = Text().with_variant(LONGTEXT(), "mysql")
 
 
+class PortableDateTime(TypeDecorator):
+    """Keep legacy SQLite date strings while using real MySQL DATETIME."""
+
+    impl = DateTime
+    cache_ok = True
+
+    def load_dialect_impl(self, dialect):
+        if dialect.name == "sqlite":
+            return dialect.type_descriptor(String(32))
+        return dialect.type_descriptor(DateTime())
+
+    @staticmethod
+    def _parse(value: str) -> datetime:
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            for pattern in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+                try:
+                    return datetime.strptime(value, pattern)
+                except ValueError:
+                    continue
+        raise ValueError(f"Unsupported datetime value: {value!r}")
+
+    def process_bind_param(self, value, dialect):
+        if value is None:
+            return None
+        if dialect.name == "sqlite":
+            if isinstance(value, datetime):
+                return value.strftime("%Y-%m-%d %H:%M:%S")
+            return str(value)
+        if isinstance(value, str):
+            return self._parse(value)
+        return value
+
+
+PORTABLE_DATETIME = PortableDateTime()
+
+
 class Base(DeclarativeBase):
     metadata = MetaData(naming_convention=NAMING_CONVENTION)
 
@@ -53,7 +92,7 @@ class User(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     username: Mapped[str] = mapped_column(String(64), nullable=False)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(PORTABLE_DATETIME, nullable=False, server_default=func.now())
 
 
 class Anime(Base):
@@ -64,7 +103,7 @@ class Anime(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     platform: Mapped[str] = mapped_column(String(64), nullable=False)
     url: Mapped[str | None] = mapped_column(LONG_TEXT)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(PORTABLE_DATETIME, nullable=False, server_default=func.now())
 
 
 class Comment(Base):
@@ -80,13 +119,13 @@ class Comment(Base):
     anime_id: Mapped[int] = mapped_column(ForeignKey("anime.id", ondelete="CASCADE"), nullable=False)
     content: Mapped[str] = mapped_column(LONG_TEXT, nullable=False)
     clean_content: Mapped[str | None] = mapped_column(LONG_TEXT)
-    publish_time: Mapped[datetime | None] = mapped_column(DateTime)
+    publish_time: Mapped[datetime | None] = mapped_column(PORTABLE_DATETIME)
     likes: Mapped[int | None] = mapped_column(Integer, default=0)
     platform: Mapped[str] = mapped_column(String(64), nullable=False)
     sentiment_label: Mapped[str | None] = mapped_column(String(32))
     sentiment_score: Mapped[float | None] = mapped_column(Float)
     model_used: Mapped[str | None] = mapped_column(String(64))
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(PORTABLE_DATETIME, nullable=False, server_default=func.now())
 
 
 class Topic(Base):
@@ -101,7 +140,7 @@ class Topic(Base):
     topic_id: Mapped[int] = mapped_column(Integer, nullable=False)
     keywords: Mapped[Any] = mapped_column(JSON, nullable=False)
     weight: Mapped[float | None] = mapped_column(Float)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(PORTABLE_DATETIME, nullable=False, server_default=func.now())
 
 
 class ChatHistory(Base):
@@ -116,7 +155,7 @@ class ChatHistory(Base):
     role: Mapped[str] = mapped_column(String(32), nullable=False)
     content: Mapped[str] = mapped_column(LONG_TEXT, nullable=False)
     anime_card: Mapped[Any | None] = mapped_column(JSON)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(PORTABLE_DATETIME, nullable=False, server_default=func.now())
 
 
 class AgentSession(Base):
@@ -131,8 +170,8 @@ class AgentSession(Base):
     agent_type: Mapped[str] = mapped_column(String(32), nullable=False)
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(PORTABLE_DATETIME, nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(PORTABLE_DATETIME, nullable=False, server_default=func.now())
 
 
 class AgentMessage(Base):
@@ -147,7 +186,7 @@ class AgentMessage(Base):
     role: Mapped[str] = mapped_column(String(32), nullable=False)
     content: Mapped[str] = mapped_column(LONG_TEXT, nullable=False)
     message_metadata: Mapped[Any | None] = mapped_column("metadata", JSON)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(PORTABLE_DATETIME, nullable=False, server_default=func.now())
 
 
 class AgentTask(Base):
@@ -167,10 +206,10 @@ class AgentTask(Base):
     error: Mapped[str | None] = mapped_column(LONG_TEXT)
     progress: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     current_step: Mapped[str] = mapped_column(String(128), nullable=False, default="queued")
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
-    started_at: Mapped[datetime | None] = mapped_column(DateTime)
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(PORTABLE_DATETIME, nullable=False, server_default=func.now())
+    started_at: Mapped[datetime | None] = mapped_column(PORTABLE_DATETIME)
+    finished_at: Mapped[datetime | None] = mapped_column(PORTABLE_DATETIME)
+    updated_at: Mapped[datetime] = mapped_column(PORTABLE_DATETIME, nullable=False, server_default=func.now())
 
 
 class UserPreference(Base):
@@ -184,7 +223,7 @@ class UserPreference(Base):
     preferred_moods: Mapped[Any] = mapped_column(JSON, nullable=False, default=list)
     preferred_genres: Mapped[Any] = mapped_column(JSON, nullable=False, default=list)
     feedback: Mapped[Any] = mapped_column(JSON, nullable=False, default=list)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(PORTABLE_DATETIME, nullable=False, server_default=func.now())
 
 
 class RagIndexJob(Base):
@@ -201,10 +240,10 @@ class RagIndexJob(Base):
     progress: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     current_step: Mapped[str] = mapped_column(String(128), nullable=False, default="queued")
     error: Mapped[str | None] = mapped_column(LONG_TEXT)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
-    started_at: Mapped[datetime | None] = mapped_column(DateTime)
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(PORTABLE_DATETIME, nullable=False, server_default=func.now())
+    started_at: Mapped[datetime | None] = mapped_column(PORTABLE_DATETIME)
+    finished_at: Mapped[datetime | None] = mapped_column(PORTABLE_DATETIME)
+    updated_at: Mapped[datetime] = mapped_column(PORTABLE_DATETIME, nullable=False, server_default=func.now())
 
 
 class RagDocument(Base):
@@ -225,8 +264,8 @@ class RagDocument(Base):
     content: Mapped[str] = mapped_column(LONG_TEXT, nullable=False)
     document_metadata: Mapped[Any] = mapped_column("metadata", JSON, nullable=False, default=dict)
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(PORTABLE_DATETIME, nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(PORTABLE_DATETIME, nullable=False, server_default=func.now())
 
 
 class RagActiveCollection(Base):
@@ -235,7 +274,7 @@ class RagActiveCollection(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
     collection_name: Mapped[str] = mapped_column(String(191), nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(PORTABLE_DATETIME, nullable=False, server_default=func.now())
 
 
 class RagCollectionMetadata(Base):
@@ -247,7 +286,7 @@ class RagCollectionMetadata(Base):
     embedding_model: Mapped[str] = mapped_column(String(255), nullable=False)
     embedding_dimension: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     document_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(PORTABLE_DATETIME, nullable=False, server_default=func.now())
 
 
 class RagEvalCase(Base):
@@ -259,7 +298,7 @@ class RagEvalCase(Base):
     query: Mapped[str] = mapped_column(LONG_TEXT, nullable=False)
     expected_anime_id: Mapped[int | None] = mapped_column(Integer)
     expected_source_type: Mapped[str | None] = mapped_column(String(64))
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(PORTABLE_DATETIME, nullable=False, server_default=func.now())
 
 
 class RagEvalRun(Base):
@@ -270,8 +309,8 @@ class RagEvalRun(Base):
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="running")
     metrics: Mapped[Any] = mapped_column(JSON, nullable=False, default=dict)
     error: Mapped[str | None] = mapped_column(LONG_TEXT)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(PORTABLE_DATETIME, nullable=False, server_default=func.now())
+    finished_at: Mapped[datetime | None] = mapped_column(PORTABLE_DATETIME)
 
 
 class RagEvalItem(Base):
@@ -286,7 +325,7 @@ class RagEvalItem(Base):
     metrics: Mapped[Any] = mapped_column(JSON, nullable=False, default=dict)
     evidence: Mapped[Any] = mapped_column(JSON, nullable=False, default=list)
     error: Mapped[str | None] = mapped_column(LONG_TEXT)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(PORTABLE_DATETIME, nullable=False, server_default=func.now())
 
 
 BUSINESS_TABLES = tuple(Base.metadata.tables)

@@ -5,10 +5,13 @@ AI 推荐 API
 """
 
 import logging
-from fastapi import APIRouter, Body
+from fastapi import APIRouter, Body, Depends
+from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.concurrency import run_in_threadpool
 
 from backend.api.common import error_response, ok
-from backend.database import get_all_anime, get_aspect_sentiment
+from backend.db.async_repository import get_all_anime, get_aspect_sentiment
+from backend.db.session import get_async_session
 from backend.services.bangumi import search_anime
 from backend.services.llm import extract_recommendation_intent, generate_anime_description
 
@@ -18,7 +21,10 @@ router = APIRouter()
 
 
 @router.post("/api/recommend")
-def recommend(body: dict | None = Body(default=None)):
+async def recommend(
+    body: dict | None = Body(default=None),
+    session: AsyncSession = Depends(get_async_session),
+):
     """
     AI 推荐接口
 
@@ -53,7 +59,7 @@ def recommend(body: dict | None = Body(default=None)):
         return error_response("query 不能为空")
 
     # 1. 获取数据库动漫列表
-    anime_list = get_all_anime()
+    anime_list = await get_all_anime(session)
     if not anime_list:
         return ok(
             {
@@ -69,7 +75,7 @@ def recommend(body: dict | None = Body(default=None)):
     anime_name_list = [a["name"] for a in anime_list]
 
     # 2. LLM 意图提取（失败时自动降级）
-    intent = extract_recommendation_intent(query, anime_name_list)
+    intent = await run_in_threadpool(extract_recommendation_intent, query, anime_name_list)
     matched_name = intent["matched_name"]
 
     # 3. 在数据库中定位目标动漫
@@ -94,17 +100,21 @@ def recommend(body: dict | None = Body(default=None)):
     # 4. 从 Bangumi 获取简介与评分
     description = ""
     bangumi_rating = 0.0
-    bgm_info = search_anime(target_anime["name"])
+    bgm_info = await run_in_threadpool(search_anime, target_anime["name"])
     if bgm_info:
         summary = bgm_info.get("summary", "")
         description = summary[:200] + "……" if len(summary) > 200 else summary
         bangumi_rating = bgm_info.get("rating", 0.0) or 0.0
     if not description:
         # 当 Bangumi 无法获取简介时，调用 LLM 联网搜索或从评论归纳
-        description = generate_anime_description(target_anime["name"], anime_id=target_anime["id"])
+        description = await run_in_threadpool(
+            generate_anime_description,
+            target_anime["name"],
+            target_anime["id"],
+        )
 
     # 5. 三维情感分析
-    aspect_sentiment = get_aspect_sentiment(target_anime["id"])
+    aspect_sentiment = await get_aspect_sentiment(session, target_anime["id"])
 
     return ok(
         {

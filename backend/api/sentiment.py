@@ -10,10 +10,12 @@
 
 import logging
 
-from fastapi import APIRouter, Body, Query
+from fastapi import APIRouter, Body, Depends, Query
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.api.common import error_response, ok
-from backend.database import get_sentiment_stats, get_sentiment_trend, get_sentiment_scatter
+from backend.db.async_repository import get_sentiment_stats, get_sentiment_trend, get_sentiment_scatter
+from backend.db.session import get_async_session
 from backend.config import DEFAULT_MODEL, TEXTCNN_MODEL_DIR, BERT_MODEL_DIR
 
 logger = logging.getLogger(__name__)
@@ -55,23 +57,27 @@ def _get_model(model_name=None):
 
 
 @router.get("/api/sentiment/stats/{anime_id}")
-def sentiment_stats(anime_id: int):
+async def sentiment_stats(anime_id: int, session: AsyncSession = Depends(get_async_session)):
     """获取情感统计"""
-    stats = get_sentiment_stats(anime_id)
+    stats = await get_sentiment_stats(session, anime_id)
     return ok(stats)
 
 
 @router.get("/api/sentiment/trend/{anime_id}")
-def sentiment_trend(anime_id: int):
+async def sentiment_trend(anime_id: int, session: AsyncSession = Depends(get_async_session)):
     """获取情感趋势"""
-    trend = get_sentiment_trend(anime_id)
+    trend = await get_sentiment_trend(session, anime_id)
     return ok(trend)
 
 
 @router.get("/api/sentiment/scatter/{anime_id}")
-def sentiment_scatter(anime_id: int, limit: int = Query(default=600)):
+async def sentiment_scatter(
+    anime_id: int,
+    limit: int = Query(default=600),
+    session: AsyncSession = Depends(get_async_session),
+):
     """获取逐条情感值（折线散点图数据）"""
-    data = get_sentiment_scatter(anime_id, limit=min(limit, 1000))
+    data = await get_sentiment_scatter(session, anime_id, limit=min(limit, 1000))
     return ok(data)
 
 
