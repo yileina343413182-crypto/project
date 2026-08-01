@@ -2,7 +2,7 @@
 
 > 基于 TextCNN / BERT 的三分类情感分析 + LDA 主题建模 + LLM 智能推荐 + Vue 3 可视化看板
 >
-> 毕业设计项目（2026届）· Python 3.12 + Flask 3.0 + Vue 3 + SQLite
+> 毕业设计项目（2026届）· Python 3.12 + FastAPI 0.139 + Vue 3 + SQLite
 
 > [!IMPORTANT]
 > 当前推荐 Agent 2.0 已迁移为 LangGraph `StateGraph`。运行时 Prompt 由
@@ -59,7 +59,7 @@
 └─────────────────────────┬───────────────────────────────────┘
                           │ HTTP REST API (JSON)
 ┌─────────────────────────▼───────────────────────────────────┐
-│                  后端层（Flask 3.0 RESTful）                  │
+│               后端层（FastAPI + Uvicorn ASGI）                │
 │  auth / data / sentiment / topic / recommend / history       │
 └──────┬──────────────┬──────────────┬──────────────┬─────────┘
        │              │              │              │
@@ -97,9 +97,9 @@
 | **情感分析** | TextCNN 三分类（正面/中性/负面），准确率约 60%；BERT 微调三分类，准确率约 63%；支持实时单条预测 | PyTorch + HuggingFace Transformers |
 | **主题挖掘** | LDA 主题建模（默认 8 个主题），支持困惑度/一致性自动调参；TF-IDF / TextRank 关键词提取 | gensim |
 | **可视化看板** | 情感分布饼图、逐条情感趋势折线图、评论词云、LDA 主题卡片、评论列表（分页+情感过滤） | Vue 3 + ECharts 5 + echarts-wordcloud |
-| **用户系统** | 注册/登录、JWT Token 认证、bcrypt 密码哈希、聊天历史持久化 | Flask-JWT-Extended + bcrypt |
+| **用户系统** | 注册/登录、JWT Token 认证、bcrypt 密码哈希、聊天历史持久化 | PyJWT + bcrypt |
 | **AI 推荐** | LLM 意图识别（提取用户想看的动漫名/类型）→ 数据库模糊匹配 → Bangumi 评分拉取 → 多维情感统计 → LLM 生成推荐理由；LLM 不可用时自动降级为本地字符串模糊匹配 | OpenAI 兼容格式（智谱 GLM-4-Flash / 通义 Qwen-turbo） |
-| **REST API** | 统一 JSON 格式 `{"code":200,"msg":"...","data":{...}}`，完整的错误码体系 | Flask Blueprint |
+| **REST API** | 统一 JSON 格式 `{"code":200,"msg":"...","data":{...}}`，完整的错误码体系 | FastAPI APIRouter |
 
 ---
 
@@ -110,9 +110,9 @@
 | 依赖 | 版本 | 用途 |
 |------|------|------|
 | Python | 3.10+ (推荐 3.12) | 后端运行时 |
-| Flask | 3.0.3 | Web 框架，应用工厂模式 |
-| Flask-CORS | 5.0.0 | 跨域资源共享 |
-| Flask-JWT-Extended | 4.7.1 | JWT Token 认证 |
+| FastAPI | 0.139.0 | Web 框架，应用工厂与 APIRouter |
+| Uvicorn | 0.51.0 | ASGI 服务（首轮固定单 worker） |
+| PyJWT | 2.12.1 | HS256 JWT Token 认证 |
 | bcrypt | 5.0.0 | 密码哈希存储 |
 | requests | 2.32.3 | HTTP 爬虫 / LLM API 调用 |
 | BeautifulSoup4 | 4.12.3 | HTML 解析 |
@@ -311,7 +311,7 @@
 
 ### 10.1 应用架构（`backend/app.py`）
 
-采用 Flask **应用工厂模式**（`create_app()`），通过 Blueprint 分模块注册路由，统一配置 CORS、JWT、错误处理。
+采用 FastAPI **应用工厂模式**（`create_app()`），通过 `APIRouter` 分模块注册同步路由，统一配置 CORS、JWT 与兼容错误处理。SQLite、Agent/RAG 线程池和 LangGraph Checkpointer 仍保持原有同步边界，首轮部署固定单 Uvicorn worker。
 
 ### 10.2 API 端点一览
 
@@ -429,7 +429,7 @@ AI 推荐响应返回一张结构化"推荐卡片"，展示：
 ### 安全设计
 
 - **密码存储**：bcrypt 哈希（加盐），不存储明文密码，防止数据库泄露后密码被逆推
-- **Token 认证**：Flask-JWT-Extended 生成 HS256 签名的 JWT，有效期 24 小时
+- **Token 认证**：PyJWT 生成 HS256 签名的 JWT，有效期 24 小时，并保留旧 Token 的 claims 兼容性
 - **输入验证**：用户名正则校验（3-20 位，字母/数字/下划线/中文），密码长度 6-72 位限制
 - **CORS 配置**：限定允许跨域的来源域，防止 CSRF
 
@@ -615,9 +615,10 @@ project/
 ├── test_api.py                     # API 接口测试脚本
 ├── requirements.txt                # Python 依赖列表
 │
-├── backend/                        # Flask 后端
-│   ├── app.py                      # 应用工厂，注册全部蓝图，初始化 JWT/CORS
+├── backend/                        # FastAPI 后端
+│   ├── app.py                      # 应用工厂，注册 APIRouter、lifespan 与 CORS
 │   ├── config.py                   # 全局配置（DB路径、端口、LLM Key、JWT密钥）
+│   ├── security.py                 # HS256 JWT 签发与认证依赖
 │   ├── database.py                 # 所有 CRUD 函数（动漫/评论/用户/聊天历史/词云/主题）
 │   ├── api/
 │   │   ├── auth.py                 # POST /register /login, GET /me（JWT 保护）
@@ -874,8 +875,8 @@ python -m topic.lda_model --anime_id 1 --find_best --min_topics 3 --max_topics 1
 │   ├── processed/                  # 清洗后 CSV
 │   └── train/                      # 模型训练数据集
 │
-├── run.py                          # 一键启动（建表+加载模型+Flask）
-├── run_server.py                   # 单独启动 Flask（不做模型预热）
+├── run.py                          # 一键启动（建表+检查模型+Uvicorn）
+├── run_server.py                   # 单独启动 FastAPI（不做模型预热）
 ├── prepare_data.py                 # 完整数据流水线 CLI
 ├── batch_predict.py                # 批量情感预测（未标注评论补全）
 ├── generate_demo_data.py           # 生成演示数据（无需爬虫）
@@ -1002,7 +1003,7 @@ CREATE TABLE chat_history (
 # 生成演示数据（3部动漫 × 500条）
 python generate_demo_data.py
 
-# 启动后端（Flask + 自动建表）
+# 启动后端（FastAPI + Uvicorn + 自动建表）
 python run.py
 # 或单独启动（不做模型预热）
 python run_server.py
@@ -1035,7 +1036,7 @@ python verify_majo.py --dry-run   # 仅测试数据库初始化
 |------|------|
 | 前端框架 | Vue 3 (Composition API) + Vite 5 + Vue Router 4 |
 | 前端可视化 | ECharts 5 + echarts-wordcloud |
-| 后端框架 | Python 3.12 + Flask 3.0 + Flask-CORS + Flask-JWT-Extended |
+| 后端框架 | Python 3.12 + FastAPI 0.139 + Uvicorn 0.51 + PyJWT |
 | 数据库 | SQLite 3（单文件，无需部署） |
 | NLP 基础 | jieba 分词 + 自定义停用词表（~2000词） |
 | 主题建模 | gensim LDA |
@@ -1094,7 +1095,7 @@ python verify_majo.py --dry-run   # 仅测试数据库初始化
 - 后端端口：`5000`（`backend/config.py` 中修改 `PORT`）
 - 前端端口：`3000`（Vite 默认）
 - 前端通过 Vite proxy 将 `/api/*` 转发到 `localhost:5000`，无需手动改 baseURL
-- CORS 已全局开放，开发模式下前后端可独立启动
+- CORS 默认允许本机 3000 端口前端，可通过 `CORS_ORIGINS` 配置
 - JWT Token 过期时间：24小时（`JWT_ACCESS_TOKEN_EXPIRES = 86400`）
 - LLM 调用失败时自动降级为本地模糊匹配，不影响基础推荐功能
 

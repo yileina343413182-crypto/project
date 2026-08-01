@@ -3,7 +3,7 @@
 ## 目的
 
 本仓库是一个面向动漫评论的情感分析与舆情监控系统。
-它包括 Python 数据流水线、Flask 后端 API、Vue 3 前端看板、SQLite
+它包括 Python 数据流水线、FastAPI 后端 API、Vue 3 前端看板、SQLite
 存储、RAG 检索，以及基于 LangGraph 的推荐和舆情 Agent。
 
 维护优先级：
@@ -61,7 +61,7 @@
 
 ## 架构概览
 
-- `backend/` 包含 Flask 应用和 API blueprint。
+- `backend/` 包含 FastAPI 应用和 API router。
 - `backend/agents/` 包含推荐/舆情 Agent、状态 Schema、工具、记忆和任务队列。
 - `backend/rag/` 包含 Embedding、Chroma、SQLite 关键词降级、索引和评测。
 - `backend/prompts/` 包含不可变 Prompt Registry、active version 和模板哈希。
@@ -73,8 +73,8 @@
 
 ## 关键文件
 
-- `run.py` — 一键启动脚本，负责初始化数据库、检查数据与模型、启动 Flask 后端。
-- `backend/app.py` — Flask 应用工厂，注册 blueprint、配置 CORS、统一错误处理、健康检查接口。
+- `run.py` — 一键启动脚本，负责初始化数据库、检查数据与模型、启动 FastAPI 后端。
+- `backend/app.py` — FastAPI 应用工厂，注册 APIRouter、配置 lifespan/CORS、统一错误处理、健康检查接口。
 - `backend/config.py` — 集中管理数据库路径、模型路径、默认模型、JWT、CORS，以及 LLM 提供商和 API 设置。
 - `backend/api/*.py` — 后端路由实现文件。
 - `backend/api/agent.py` — 推荐 Agent 2.0、舆情 Agent、任务和会话 API。
