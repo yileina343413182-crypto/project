@@ -14,7 +14,8 @@ import os
 import sys
 import logging
 import argparse
-import sqlite3
+
+from sqlalchemy import func, select
 
 # Windows 终端 UTF-8 输出
 if sys.platform == "win32":
@@ -34,9 +35,11 @@ PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-DB_PATH = os.path.join(PROJECT_ROOT, "data", "anime_sentiment.db")
 TEXTCNN_MODEL_DIR = os.path.join(PROJECT_ROOT, "models", "saved", "textcnn")
 BERT_MODEL_DIR = os.path.join(PROJECT_ROOT, "models", "saved", "bert")
+
+from backend.db.models import Anime, Comment, Topic
+from backend.db.session import get_sync_engine, session_scope
 
 # ANSI 颜色
 GREEN = "\033[92m"
@@ -78,9 +81,11 @@ def init_database():
     step("初始化数据库...")
     os.makedirs(os.path.join(PROJECT_ROOT, "data"), exist_ok=True)
     try:
-        from crawler.cleaner import init_database
-        init_database(DB_PATH)
-        ok(f"数据库已就绪: {DB_PATH}")
+        from crawler.cleaner import init_database as initialize_business_database
+        session = initialize_business_database()
+        session.close()
+        target = get_sync_engine().url.render_as_string(hide_password=True)
+        ok(f"数据库已就绪: {target}")
         return True
     except Exception as e:
         err(f"数据库初始化失败: {e}")
@@ -91,21 +96,14 @@ def init_database():
 
 def check_data():
     step("检查数据库数据...")
-    if not os.path.exists(DB_PATH):
-        warn("数据库文件不存在")
-        return False
-
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cur = conn.cursor()
-
-        anime_count = cur.execute("SELECT COUNT(*) FROM anime").fetchone()[0]
-        comment_count = cur.execute("SELECT COUNT(*) FROM comments").fetchone()[0]
-        labeled_count = cur.execute(
-            "SELECT COUNT(*) FROM comments WHERE sentiment_label IS NOT NULL"
-        ).fetchone()[0]
-        topic_count = cur.execute("SELECT COUNT(*) FROM topics").fetchone()[0]
-        conn.close()
+        with session_scope() as session:
+            anime_count = session.scalar(select(func.count()).select_from(Anime)) or 0
+            comment_count = session.scalar(select(func.count()).select_from(Comment)) or 0
+            labeled_count = session.scalar(
+                select(func.count()).select_from(Comment).where(Comment.sentiment_label.is_not(None))
+            ) or 0
+            topic_count = session.scalar(select(func.count()).select_from(Topic)) or 0
 
         ok(f"动漫数量: {anime_count} 部")
         ok(f"评论总数: {comment_count} 条（已标注: {labeled_count}）")

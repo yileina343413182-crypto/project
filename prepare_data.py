@@ -26,8 +26,8 @@ import os
 import sys
 import logging
 import argparse
-import sqlite3
-import subprocess
+
+from sqlalchemy import case, func, select
 
 # Windows 终端 UTF-8 输出
 if sys.platform == "win32":
@@ -46,7 +46,8 @@ PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-DB_PATH = os.path.join(PROJECT_ROOT, "data", "anime_sentiment.db")
+from backend.db.models import Anime, Comment
+from backend.db.session import session_scope
 
 GREEN = "\033[92m"
 YELLOW = "\033[93m"
@@ -79,34 +80,32 @@ def err(msg):
 def ensure_db():
     """确保数据库存在并建表"""
     from crawler.cleaner import init_database
-    init_database(DB_PATH)
+    session = init_database()
+    session.close()
 
 
 def get_anime_id_by_name(name):
     """根据动漫名称查询 ID"""
-    if not os.path.exists(DB_PATH):
-        return None
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    row = cur.execute("SELECT id FROM anime WHERE name = ?", (name,)).fetchone()
-    conn.close()
-    return row[0] if row else None
+    with session_scope() as session:
+        return session.scalar(select(Anime.id).where(Anime.name == name).order_by(Anime.id))
 
 
 def list_anime():
     """列出数据库中所有动漫"""
-    if not os.path.exists(DB_PATH):
-        warn("数据库不存在")
-        return
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    rows = cur.execute(
-        "SELECT a.id, a.name, a.platform, COUNT(c.id) AS cnt, "
-        "SUM(CASE WHEN c.sentiment_label IS NOT NULL THEN 1 ELSE 0 END) AS labeled "
-        "FROM anime a LEFT JOIN comments c ON c.anime_id = a.id "
-        "GROUP BY a.id ORDER BY a.id"
-    ).fetchall()
-    conn.close()
+    statement = (
+        select(
+            Anime.id,
+            Anime.name,
+            Anime.platform,
+            func.count(Comment.id),
+            func.coalesce(func.sum(case((Comment.sentiment_label.is_not(None), 1), else_=0)), 0),
+        )
+        .outerjoin(Comment, Comment.anime_id == Anime.id)
+        .group_by(Anime.id, Anime.name, Anime.platform)
+        .order_by(Anime.id)
+    )
+    with session_scope() as session:
+        rows = session.execute(statement).all()
 
     if not rows:
         warn("数据库中暂无动漫数据")
@@ -180,8 +179,6 @@ def clean_and_import(raw_csv_path, anime_name, platform="bilibili"):
             save_to_database
         )
 
-        init_database(DB_PATH)
-
         import pandas as pd
         df = pd.read_csv(raw_csv_path, encoding="utf-8-sig")
         logger.info("读取原始数据 %d 条", len(df))
@@ -190,11 +187,9 @@ def clean_and_import(raw_csv_path, anime_name, platform="bilibili"):
         df_clean = clean_dataframe(df, stopwords, platform=platform)
         logger.info("清洗后剩余 %d 条", len(df_clean))
 
-        conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row
+        conn = init_database()
         anime_id = get_or_create_anime(conn, anime_name, platform)
         inserted = save_to_database(conn, df_clean, anime_id, platform)
-        conn.commit()
         conn.close()
 
         ok(f"导入完成: anime_id={anime_id}，新增 {inserted} 条评论")
@@ -212,7 +207,7 @@ def run_sentiment_predict(anime_id, model="textcnn", overwrite=False):
     """批量情感预测"""
     step(f"[3/4] 情感批量预测 (model={model}, anime_id={anime_id})")
     try:
-        from batch_predict import load_model, fetch_comments, save_results
+        from batch_predict import load_model, fetch_comments, update_predictions
 
         clf = load_model(model)
         if clf is None:
@@ -229,18 +224,18 @@ def run_sentiment_predict(anime_id, model="textcnn", overwrite=False):
         batch_size = 64
         for i in range(0, len(comments), batch_size):
             batch = comments[i:i + batch_size]
-            texts = [c["content"] for c in batch]
+            texts = [comment[1] for comment in batch]
             preds = clf.predict(texts)
-            for c, (label, score) in zip(batch, preds):
-                results.append({
-                    "id": c["id"],
-                    "label": label,
-                    "score": score,
-                    "model": model
-                })
+            for comment, prediction in zip(batch, preds):
+                results.append((
+                    prediction["label"],
+                    prediction["confidence"],
+                    model,
+                    comment[0],
+                ))
             logger.info("进度: %d/%d", min(i + batch_size, len(comments)), len(comments))
 
-        save_results(results)
+        update_predictions(updates=results)
         ok(f"情感预测完成，共预测 {len(results)} 条")
         return True
 
@@ -323,10 +318,8 @@ def main():
 
     # --topics-only
     if args.topics_only:
-        conn = sqlite3.connect(DB_PATH)
-        cur = conn.cursor()
-        anime_ids = [r[0] for r in cur.execute("SELECT id FROM anime").fetchall()]
-        conn.close()
+        with session_scope() as session:
+            anime_ids = list(session.scalars(select(Anime.id).order_by(Anime.id)))
         if not anime_ids:
             warn("数据库中没有动漫数据")
             return

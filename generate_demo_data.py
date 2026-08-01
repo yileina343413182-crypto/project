@@ -22,11 +22,11 @@
 import os
 import sys
 import random
-import sqlite3
-import json
 import logging
 import argparse
 from datetime import datetime, timedelta
+
+from sqlalchemy import case, delete, func, select
 
 # Windows 终端 UTF-8 输出
 if sys.platform == "win32":
@@ -45,7 +45,8 @@ PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-DB_PATH = os.path.join(PROJECT_ROOT, "data", "anime_sentiment.db")
+from backend.db.models import Anime, Base, Comment, Topic
+from backend.db.session import get_sessionmaker, get_sync_engine
 
 random.seed(42)
 
@@ -366,64 +367,27 @@ def generate_comment(anime_def, sentiment, publish_time):
     return content, score
 
 
-def init_db(db_path):
+def init_db(db_path=None):
     """初始化数据库表结构"""
-    os.makedirs(os.path.dirname(db_path), exist_ok=True)
-    conn = sqlite3.connect(db_path)
-    cur = conn.cursor()
-    cur.executescript("""
-        CREATE TABLE IF NOT EXISTS anime (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            platform TEXT NOT NULL,
-            url TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        CREATE TABLE IF NOT EXISTS comments (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            anime_id INTEGER NOT NULL,
-            content TEXT NOT NULL,
-            clean_content TEXT,
-            publish_time TIMESTAMP,
-            likes INTEGER DEFAULT 0,
-            platform TEXT NOT NULL,
-            sentiment_label TEXT,
-            sentiment_score REAL,
-            model_used TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (anime_id) REFERENCES anime(id)
-        );
-        CREATE TABLE IF NOT EXISTS topics (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            anime_id INTEGER NOT NULL,
-            topic_id INTEGER NOT NULL,
-            keywords TEXT NOT NULL,
-            weight REAL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (anime_id) REFERENCES anime(id)
-        );
-    """)
-    conn.commit()
-    return conn
+    if db_path:
+        os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
+    engine = get_sync_engine(db_path=db_path)
+    Base.metadata.create_all(engine, tables=[Anime.__table__, Comment.__table__, Topic.__table__])
+    return get_sessionmaker(db_path=db_path)()
 
 
 def generate_anime_comments(conn, anime_def, count=500):
     """为一部动漫生成 count 条评论并插入数据库"""
-    cur = conn.cursor()
-
     # 插入或获取动漫记录
-    cur.execute("SELECT id FROM anime WHERE name = ?", (anime_def["name"],))
-    row = cur.fetchone()
-    if row:
-        anime_id = row[0]
+    anime_id = conn.scalar(select(Anime.id).where(Anime.name == anime_def["name"]))
+    if anime_id is not None:
         logger.info("动漫 [%s] 已存在 (id=%d)，更新评论", anime_def["name"], anime_id)
-        cur.execute("DELETE FROM comments WHERE anime_id = ?", (anime_id,))
+        conn.execute(delete(Comment).where(Comment.anime_id == anime_id))
     else:
-        cur.execute(
-            "INSERT INTO anime (name, platform) VALUES (?, ?)",
-            (anime_def["name"], anime_def["platform"])
-        )
-        anime_id = cur.lastrowid
+        anime = Anime(name=anime_def["name"], platform=anime_def["platform"])
+        conn.add(anime)
+        conn.flush()
+        anime_id = anime.id
         logger.info("创建动漫 [%s] id=%d", anime_def["name"], anime_id)
 
     # 情感分布：60% 正面 / 20% 中性 / 20% 负面
@@ -448,24 +412,26 @@ def generate_anime_comments(conn, anime_def, count=500):
         offset_sec = int(random.gauss(total_seconds * 0.7, total_seconds * 0.2))
         offset_sec = max(0, min(total_seconds, offset_sec))
         publish_dt = start_time + timedelta(seconds=offset_sec)
-        publish_time = publish_dt.strftime("%Y-%m-%d %H:%M:%S")
+        publish_time = publish_dt
 
         content, score = generate_comment(anime_def, label, publish_time)
         likes = int(random.expovariate(1 / 15))  # 指数分布，大多数 likes 较少
         platform = anime_def["platform"]
         model_used = random.choice(["textcnn", "bert"])
 
-        records.append((
-            anime_id, content, content,  # content, clean_content 相同
-            publish_time, likes, platform, label, score, model_used
-        ))
+        records.append({
+            "anime_id": anime_id,
+            "content": content,
+            "clean_content": content,
+            "publish_time": publish_time,
+            "likes": likes,
+            "platform": platform,
+            "sentiment_label": label,
+            "sentiment_score": score,
+            "model_used": model_used,
+        })
 
-    cur.executemany(
-        "INSERT INTO comments (anime_id, content, clean_content, publish_time, likes, "
-        "platform, sentiment_label, sentiment_score, model_used) VALUES "
-        "(?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        records
-    )
+    conn.execute(Comment.__table__.insert(), records)
     conn.commit()
     logger.info("插入 %d 条评论 (anime_id=%d)", len(records), anime_id)
     return anime_id
@@ -473,33 +439,40 @@ def generate_anime_comments(conn, anime_def, count=500):
 
 def generate_topics(conn, anime_id, anime_name):
     """插入预设主题数据"""
-    cur = conn.cursor()
-    cur.execute("DELETE FROM topics WHERE anime_id = ?", (anime_id,))
+    conn.execute(delete(Topic).where(Topic.anime_id == anime_id))
 
     topics = TOPIC_TEMPLATES.get(anime_name, [])
+    records = []
     for t in topics:
-        keywords_json = json.dumps(t["keywords"], ensure_ascii=False)
         weight = sum(k["weight"] for k in t["keywords"])
-        cur.execute(
-            "INSERT INTO topics (anime_id, topic_id, keywords, weight) VALUES (?, ?, ?, ?)",
-            (anime_id, t["topic_id"], keywords_json, round(weight, 6))
-        )
+        records.append({
+            "anime_id": anime_id,
+            "topic_id": t["topic_id"],
+            "keywords": t["keywords"],
+            "weight": round(weight, 6),
+        })
+    if records:
+        conn.execute(Topic.__table__.insert(), records)
     conn.commit()
     logger.info("插入 %d 个主题 (anime_id=%d, name=%s)", len(topics), anime_id, anime_name)
 
 
 def print_summary(conn):
     """打印生成结果摘要"""
-    cur = conn.cursor()
-    rows = cur.execute(
-        "SELECT a.id, a.name, a.platform, "
-        "COUNT(c.id) AS total, "
-        "SUM(CASE WHEN c.sentiment_label='positive' THEN 1 ELSE 0 END) AS pos, "
-        "SUM(CASE WHEN c.sentiment_label='neutral'  THEN 1 ELSE 0 END) AS neu, "
-        "SUM(CASE WHEN c.sentiment_label='negative' THEN 1 ELSE 0 END) AS neg "
-        "FROM anime a LEFT JOIN comments c ON c.anime_id = a.id "
-        "GROUP BY a.id ORDER BY a.id"
-    ).fetchall()
+    rows = conn.execute(
+        select(
+            Anime.id,
+            Anime.name,
+            Anime.platform,
+            func.count(Comment.id),
+            func.coalesce(func.sum(case((Comment.sentiment_label == "positive", 1), else_=0)), 0),
+            func.coalesce(func.sum(case((Comment.sentiment_label == "neutral", 1), else_=0)), 0),
+            func.coalesce(func.sum(case((Comment.sentiment_label == "negative", 1), else_=0)), 0),
+        )
+        .outerjoin(Comment, Comment.anime_id == Anime.id)
+        .group_by(Anime.id, Anime.name, Anime.platform)
+        .order_by(Anime.id)
+    ).all()
 
     print(f"\n\033[96m{'─'*68}\033[0m")
     print(f"\033[96m{'ID':<5}{'动漫名称':<18}{'平台':<12}{'评论总数':<10}{'正面':<8}{'中性':<8}{'负面':<8}\033[0m")
@@ -508,7 +481,7 @@ def print_summary(conn):
         print(f"{r[0]:<5}{r[1]:<18}{r[2]:<12}{r[3]:<10}"
               f"\033[92m{r[4]:<8}\033[0m{r[5]:<8}\033[91m{r[6]:<8}\033[0m")
 
-    topic_count = cur.execute("SELECT COUNT(*) FROM topics").fetchone()[0]
+    topic_count = conn.scalar(select(func.count()).select_from(Topic))
     print(f"\033[96m{'─'*68}\033[0m")
     print(f"\033[92m✓ 主题总数: {topic_count} 个\033[0m\n")
 
@@ -530,12 +503,13 @@ def main():
     print(f"\033[96m\033[1m  每部动漫: {args.count} 条评论\033[0m")
     print(f"\033[96m\033[1m{'='*55}\033[0m\n")
 
-    conn = init_db(DB_PATH)
+    conn = init_db()
 
     if args.clear:
         print("\033[93m  ⚠ 清空所有数据...\033[0m")
-        cur = conn.cursor()
-        cur.executescript("DELETE FROM topics; DELETE FROM comments; DELETE FROM anime;")
+        conn.execute(delete(Topic))
+        conn.execute(delete(Comment))
+        conn.execute(delete(Anime))
         conn.commit()
         print("\033[92m  ✓ 清空完成\033[0m\n")
 

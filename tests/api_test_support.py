@@ -6,6 +6,7 @@ from __future__ import annotations
 import atexit
 import os
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 
@@ -19,7 +20,8 @@ if _SOURCE_DB.exists():
 else:
     from crawler.cleaner import init_database
 
-    init_database(_db_file.name)
+    _session = init_database(_db_file.name)
+    _session.close()
 
 _checkpoint_file = tempfile.NamedTemporaryFile(
     prefix="anime_checkpoint_test_",
@@ -28,7 +30,11 @@ _checkpoint_file = tempfile.NamedTemporaryFile(
 )
 _checkpoint_file.close()
 
+_sync_url = f"sqlite+pysqlite:///{Path(_db_file.name).resolve().as_posix()}"
+_async_url = f"sqlite+aiosqlite:///{Path(_db_file.name).resolve().as_posix()}"
 os.environ["DATABASE_PATH"] = _db_file.name
+os.environ["DATABASE_URL"] = _sync_url
+os.environ["ASYNC_DATABASE_URL"] = _async_url
 os.environ["RECOMMEND_CHECKPOINT_DB"] = _checkpoint_file.name
 for _name in (
     "LLM_API_KEY",
@@ -39,6 +45,25 @@ for _name in (
     "ZHIPU_API_KEY",
 ):
     os.environ[_name] = ""
+
+# Tests may be collected after another module has already imported backend.config.
+# Refresh the cached configuration and session-module aliases so import order can
+# never redirect an isolated test to the project databases.
+import backend.config as _config
+import backend.db.session as _db_session
+
+_config.DB_PATH = _db_file.name
+_config.DATABASE_URL = _sync_url
+_config.ASYNC_DATABASE_URL = _async_url
+_config.DATABASE_IS_MYSQL = False
+_config.RECOMMEND_CHECKPOINT_DB = _checkpoint_file.name
+_db_session.DATABASE_URL = _sync_url
+_db_session.ASYNC_DATABASE_URL = _async_url
+if "backend.agents.recommend_graph" in sys.modules:
+    _recommend_graph = sys.modules["backend.agents.recommend_graph"]
+    _recommend_graph.RECOMMEND_CHECKPOINT_DB = _checkpoint_file.name
+    _recommend_graph.build_recommendation_graph.cache_clear()
+    _recommend_graph._get_recommendation_checkpointer.cache_clear()
 
 
 def _cleanup_file(path: str) -> None:
