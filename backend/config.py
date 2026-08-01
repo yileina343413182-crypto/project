@@ -2,6 +2,8 @@
 """后端配置。"""
 
 import os
+from pathlib import Path
+from urllib.parse import quote_plus
 
 # 项目根目录
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -36,6 +38,52 @@ DB_PATH = os.environ.get(
     "DATABASE_PATH",
     os.path.join(PROJECT_ROOT, "data", "anime_sentiment.db"),
 ).strip()
+
+
+def _build_mysql_url(driver: str) -> str | None:
+    """仅在完整提供 MySQL 认证信息时构造 URL，避免猜测本机凭据。"""
+    user = os.environ.get("MYSQL_USER", "").strip()
+    password = os.environ.get("MYSQL_PASSWORD", "")
+    database = os.environ.get("MYSQL_DATABASE", "").strip()
+    if not user or not database:
+        return None
+    host = os.environ.get("MYSQL_HOST", "127.0.0.1").strip()
+    port = _get_int_env("MYSQL_PORT", 3306)
+    return (
+        f"mysql+{driver}://{quote_plus(user)}:{quote_plus(password)}"
+        f"@{host}:{port}/{database}?charset=utf8mb4"
+    )
+
+
+def _sqlite_url(driver: str) -> str:
+    path = Path(DB_PATH).resolve().as_posix()
+    return f"sqlite+{driver}:///{path}"
+
+
+# 未配置 MySQL 凭据时继续使用 SQLite，确保迁移分支可回归且不会误连数据库。
+# 正式切换只需提供 DATABASE_URL / ASYNC_DATABASE_URL 或 MYSQL_* 环境变量。
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+if not DATABASE_URL:
+    DATABASE_URL = _build_mysql_url("pymysql") or _sqlite_url("pysqlite")
+
+ASYNC_DATABASE_URL = os.environ.get("ASYNC_DATABASE_URL", "").strip()
+if not ASYNC_DATABASE_URL:
+    if DATABASE_URL.startswith("mysql+"):
+        ASYNC_DATABASE_URL = DATABASE_URL.replace(
+            DATABASE_URL.split(":", 1)[0],
+            "mysql+aiomysql",
+            1,
+        )
+    elif DATABASE_URL.startswith("sqlite+"):
+        ASYNC_DATABASE_URL = DATABASE_URL.replace(
+            DATABASE_URL.split(":", 1)[0],
+            "sqlite+aiosqlite",
+            1,
+        )
+    else:
+        ASYNC_DATABASE_URL = _sqlite_url("aiosqlite")
+
+DATABASE_IS_MYSQL = DATABASE_URL.startswith("mysql+")
 
 # 模型路径
 TEXTCNN_MODEL_DIR = os.path.join(PROJECT_ROOT, "models", "saved", "textcnn")

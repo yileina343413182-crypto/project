@@ -35,6 +35,13 @@ uvicorn==0.51.0
 # FastAPI TestClient 的直接测试依赖。
 httpx==0.28.1
 
+# ─── 数据库 ORM / 迁移 ───────────────────────────────────
+# FastAPI 请求使用 AsyncSession + aiomysql；Agent/脚本使用同步 PyMySQL。
+SQLAlchemy==2.0.51
+aiomysql==0.3.2
+PyMySQL==1.2.0
+alembic==1.18.5
+
 # ─── 工具库 ──────────────────────────────────────────────
 tqdm==4.66.5
 
