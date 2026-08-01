@@ -100,6 +100,15 @@ def migrate_business_tables(source: Engine, target: Engine, chunk_size: int = 10
     expected_counts: dict[str, int] = {}
 
     with source.connect() as source_connection, target.begin() as target_connection:
+        if target.dialect.name == "mysql":
+            # Preserve legitimate SQLite primary key 0 values instead of treating
+            # them as MySQL AUTO_INCREMENT requests. This is connection-local.
+            target_connection.exec_driver_sql(
+                "SET SESSION sql_mode = IF("
+                "FIND_IN_SET('NO_AUTO_VALUE_ON_ZERO', @@SESSION.sql_mode), "
+                "@@SESSION.sql_mode, "
+                "CONCAT_WS(',', NULLIF(@@SESSION.sql_mode, ''), 'NO_AUTO_VALUE_ON_ZERO'))"
+            )
         for table in Base.metadata.sorted_tables:
             if not source_inspector.has_table(table.name):
                 expected_counts[table.name] = 0

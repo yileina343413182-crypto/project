@@ -9,7 +9,7 @@ from pathlib import Path
 import pandas as pd
 from sqlalchemy import select
 
-from backend.db.models import Base, Comment, Topic
+from backend.db.models import Anime, Base, Comment, Topic
 from backend.db.session import dispose_sync_engines, get_sync_engine, session_scope
 from batch_predict import fetch_comments, update_predictions
 from crawler.cleaner import get_or_create_anime, init_database, save_to_database
@@ -71,6 +71,8 @@ class OfflineOrmTest(unittest.TestCase):
 
     def test_sqlite_copy_is_atomic_and_verifies_all_business_tables(self):
         source_session = init_database(str(self.path))
+        source_session.add(Anime(id=0, name="Zero id", platform="test"))
+        source_session.flush()
         get_or_create_anime(source_session, "Migration test", "test")
         source_session.commit()
         source_session.close()
@@ -85,7 +87,12 @@ class OfflineOrmTest(unittest.TestCase):
                 get_sync_engine(db_path=str(self.path)), target_engine, chunk_size=1
             )
             self.assertEqual(set(counts), set(Base.metadata.tables))
-            self.assertEqual(counts["anime"], 1)
+            self.assertEqual(counts["anime"], 2)
+            with session_scope(db_path=str(target_path)) as target_session:
+                self.assertEqual(
+                    list(target_session.scalars(select(Anime.id).order_by(Anime.id))),
+                    [0, 1],
+                )
         finally:
             target_engine.dispose()
             target_path.unlink(missing_ok=True)
