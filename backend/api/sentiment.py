@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-情感分析 API Blueprint
+情感分析 API
 
 端点：
     GET  /api/sentiment/stats/<anime_id>  → 情感统计（饼图数据）
@@ -10,14 +10,15 @@
 
 import logging
 
-from flask import Blueprint, request
+from fastapi import APIRouter, Body, Query
 
+from backend.api.common import error_response, ok
 from backend.database import get_sentiment_stats, get_sentiment_trend, get_sentiment_scatter
 from backend.config import DEFAULT_MODEL, TEXTCNN_MODEL_DIR, BERT_MODEL_DIR
 
 logger = logging.getLogger(__name__)
 
-sentiment_bp = Blueprint("sentiment", __name__)
+router = APIRouter()
 
 # 模型缓存（延迟加载）
 _model_cache = {}
@@ -53,64 +54,54 @@ def _get_model(model_name=None):
         return None, model_name
 
 
-def _success(data, msg="success"):
-    return {"code": 200, "msg": msg, "data": data}
-
-
-def _error(msg, code=400):
-    return {"code": code, "msg": msg, "data": None}, code
-
-
-@sentiment_bp.route("/api/sentiment/stats/<int:anime_id>", methods=["GET"])
-def sentiment_stats(anime_id):
+@router.get("/api/sentiment/stats/{anime_id}")
+def sentiment_stats(anime_id: int):
     """获取情感统计"""
     stats = get_sentiment_stats(anime_id)
-    return _success(stats)
+    return ok(stats)
 
 
-@sentiment_bp.route("/api/sentiment/trend/<int:anime_id>", methods=["GET"])
-def sentiment_trend(anime_id):
+@router.get("/api/sentiment/trend/{anime_id}")
+def sentiment_trend(anime_id: int):
     """获取情感趋势"""
     trend = get_sentiment_trend(anime_id)
-    return _success(trend)
+    return ok(trend)
 
 
-@sentiment_bp.route("/api/sentiment/scatter/<int:anime_id>", methods=["GET"])
-def sentiment_scatter(anime_id):
+@router.get("/api/sentiment/scatter/{anime_id}")
+def sentiment_scatter(anime_id: int, limit: int = Query(default=600)):
     """获取逐条情感值（折线散点图数据）"""
-    limit = request.args.get("limit", 600, type=int)
     data = get_sentiment_scatter(anime_id, limit=min(limit, 1000))
-    return _success(data)
+    return ok(data)
 
 
-@sentiment_bp.route("/api/sentiment/predict", methods=["POST"])
-def sentiment_predict():
+@router.post("/api/sentiment/predict")
+def sentiment_predict(data: dict | None = Body(default=None)):
     """
     实时情感分析预测
 
     请求体:
         {"text": "这部动漫太好看了", "model": "textcnn"}  # model可选，默认textcnn
     """
-    data = request.get_json(silent=True)
     if not data or "text" not in data:
-        return _error("缺少 text 参数")
+        return error_response("缺少 text 参数")
 
-    text = data["text"].strip()
+    text = str(data["text"]).strip()
     if not text:
-        return _error("text 不能为空")
+        return error_response("text 不能为空")
 
     model_name = data.get("model", DEFAULT_MODEL)
     classifier, model_name = _get_model(model_name)
 
     if classifier is None:
-        return _error("模型加载失败: %s" % model_name, 500)
+        return error_response("模型加载失败: %s" % model_name, 500)
 
     try:
         results = classifier.predict(text)
         result = results[0]
         result["model"] = model_name
         result["text"] = text
-        return _success(result)
+        return ok(result)
     except Exception as e:
         logger.error("预测失败: %s", e)
-        return _error("预测失败: %s" % str(e), 500)
+        return error_response("预测失败: %s" % str(e), 500)

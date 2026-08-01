@@ -6,7 +6,7 @@
     1. 初始化数据库（建表）
     2. 检查数据是否存在，无数据时提示先运行 generate_demo_data.py
     3. 检查模型文件是否存在
-    4. 启动 Flask 后端服务
+    4. 启动 FastAPI 后端服务
 
 """
 
@@ -160,10 +160,10 @@ def check_models():
     return True  # 模型不存在不阻塞启动
 
 
-# ───────────────────────── 步骤4：启动 Flask ─────────────────────────
+# ───────────────────────── 步骤4：启动 FastAPI ─────────────────────────
 
-def start_flask(host="0.0.0.0", port=5000, debug=False):
-    step(f"启动 Flask 后端服务...")
+def start_fastapi(host="0.0.0.0", port=5000, debug=False):
+    step("启动 FastAPI 后端服务...")
     print(f"""
 {GREEN}{BOLD}  系统启动成功！{RESET}
 {GREEN}  后端 API: http://localhost:{port}/api/health{RESET}
@@ -177,11 +177,18 @@ def start_flask(host="0.0.0.0", port=5000, debug=False):
   按 Ctrl+C 停止服务
 """)
     try:
-        from backend.app import create_app
-        app = create_app()
-        app.run(host=host, port=port, debug=debug)
+        import uvicorn
+
+        uvicorn.run(
+            "backend.app:create_app",
+            factory=True,
+            host=host,
+            port=port,
+            reload=debug,
+            workers=1,
+        )
     except ImportError as e:
-        err(f"无法导入 Flask 应用: {e}")
+        err(f"无法导入 FastAPI 应用: {e}")
         err("请确保已安装依赖: pip install -r requirements.txt")
         sys.exit(1)
     except OSError as e:
@@ -198,7 +205,7 @@ def main():
     parser = argparse.ArgumentParser(description="动漫情感分析系统一键启动脚本")
     parser.add_argument("--host", default="0.0.0.0", help="监听地址 (默认 0.0.0.0)")
     parser.add_argument("--port", type=int, default=5000, help="端口号 (默认 5000)")
-    parser.add_argument("--debug", action="store_true", help="开启 Flask 调试模式")
+    parser.add_argument("--debug", action="store_true", help="开启 FastAPI 自动重载")
     parser.add_argument("--no-check", action="store_true", help="跳过数据检查直接启动")
     args = parser.parse_args()
 
@@ -222,8 +229,8 @@ def main():
     # 步骤3：检查模型
     check_models()
 
-    # 步骤4：启动 Flask
-    start_flask(host=args.host, port=args.port, debug=args.debug)
+    # 步骤4：启动 FastAPI
+    start_fastapi(host=args.host, port=args.port, debug=args.debug)
 
 
 if __name__ == "__main__":
