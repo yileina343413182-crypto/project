@@ -10,7 +10,9 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy import JSON, create_engine, func, inspect, select
@@ -21,9 +23,14 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from backend.config import DATABASE_URL, DB_PATH
-from backend.db.models import BUSINESS_TABLES, Base
+from backend.db.models import BUSINESS_TABLES, Base, PortableDateTime
 
 logger = logging.getLogger(__name__)
+_RELATIVE_TIME = re.compile(
+    r"^\s*(?:(?P<days>\d+)d)?\s*(?:(?P<hours>\d+)h)?\s*"
+    r"(?:(?P<minutes>\d+)m)?\s*ago\s*$",
+    re.IGNORECASE,
+)
 
 
 class MigrationPreflightError(RuntimeError):
@@ -43,6 +50,29 @@ def _normalize_row(table, row: dict) -> dict:
     primary_key = tuple(row.get(column.name) for column in table.primary_key.columns)
     for column in table.columns:
         value = normalized.get(column.name)
+        if isinstance(column.type, PortableDateTime) and isinstance(value, str):
+            try:
+                normalized[column.name] = PortableDateTime._parse(value)
+            except ValueError as exc:
+                match = _RELATIVE_TIME.fullmatch(value)
+                if table.name != "comments" or column.name != "publish_time" or not match:
+                    raise MigrationPreflightError(
+                        f"Invalid datetime in {table.name}.{column.name}, primary key={primary_key}"
+                    ) from exc
+                parts = {name: int(match.group(name) or 0) for name in ("days", "hours", "minutes")}
+                if not any(parts.values()):
+                    raise MigrationPreflightError(
+                        f"Invalid relative datetime in comments.publish_time, primary key={primary_key}"
+                    ) from exc
+                anchor = normalized.get("created_at")
+                if isinstance(anchor, str):
+                    anchor = PortableDateTime._parse(anchor)
+                if not isinstance(anchor, datetime):
+                    raise MigrationPreflightError(
+                        f"Relative publish_time has no valid created_at, primary key={primary_key}"
+                    ) from exc
+                normalized[column.name] = anchor - timedelta(**parts)
+            continue
         if not isinstance(column.type, JSON) or value is None or not isinstance(value, (str, bytes)):
             continue
         if isinstance(value, bytes):

@@ -73,7 +73,14 @@ class OfflineOrmTest(unittest.TestCase):
         source_session = init_database(str(self.path))
         source_session.add(Anime(id=0, name="Zero id", platform="test"))
         source_session.flush()
-        get_or_create_anime(source_session, "Migration test", "test")
+        anime_id = get_or_create_anime(source_session, "Migration test", "test")
+        source_session.add(Comment(
+            anime_id=anime_id,
+            content="Relative time",
+            publish_time="1d 3h ago",
+            platform="test",
+            created_at="2026-04-13 11:36:40",
+        ))
         source_session.commit()
         source_session.close()
 
@@ -93,6 +100,10 @@ class OfflineOrmTest(unittest.TestCase):
                     list(target_session.scalars(select(Anime.id).order_by(Anime.id))),
                     [0, 1],
                 )
+                relative_comment = target_session.scalar(
+                    select(Comment).where(Comment.content == "Relative time")
+                )
+                self.assertEqual(relative_comment.publish_time, "2026-04-12 08:36:40")
         finally:
             target_engine.dispose()
             target_path.unlink(missing_ok=True)
