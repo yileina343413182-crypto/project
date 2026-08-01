@@ -13,7 +13,7 @@
 
 1. 备份 `data/anime_sentiment.db` 和 `data/langgraph_checkpoints.db`，记录 SHA256。
 2. 在 MySQL 8 创建一个空数据库和最小权限应用账号；字符集使用 `utf8mb4`。
-3. 在启动服务的同一终端配置 `MYSQL_HOST`、`MYSQL_PORT`、`MYSQL_DATABASE`、`MYSQL_USER`、`MYSQL_PASSWORD`。也可直接配置同步 `DATABASE_URL` 和异步 `ASYNC_DATABASE_URL`。
+3. 在启动服务的同一终端配置 `MYSQL_HOST`、`MYSQL_PORT`、`MYSQL_DATABASE`、`MYSQL_USER`、`MYSQL_PASSWORD`。也可直接配置同步 `DATABASE_URL` 和异步 `ASYNC_DATABASE_URL`。本地开发还可以把同名配置写入仓库根目录的 `.env.mysql.local`；该文件已被 Git 忽略，项目启动时自动读取，且不会覆盖已有的进程环境变量。
 4. 创建业务表：
 
    ```powershell
@@ -27,6 +27,18 @@
    ```
 
    迁移工具要求目标业务表为空，在一个事务中写入，逐表核对行数；遇到源 schema 漂移、非法 JSON、外键错误或目标已有数据时直接停止。它不会读取或修改 LangGraph Checkpoint。
+
+   迁移后执行逐行逐列的只读一致性核验：
+
+   ```powershell
+   & '..\.venv\Scripts\python.exe' 'scripts\verify_mysql_migration.py'
+   ```
+
+   再执行同步/异步 MySQL 事务运行探测；探测数据会回滚，并同时确认 Checkpoint SQLite 未变化：
+
+   ```powershell
+   & '..\.venv\Scripts\python.exe' 'scripts\verify_mysql_runtime.py'
+   ```
 
 6. 先以单 Uvicorn worker 启动，验证登录、历史、分析查询、Agent 任务、RAG 检索及写后读一致性，再进行前端构建和完整回归。
 7. 观察稳定后再评估增加 worker。Agent 当前含进程内线程池和状态，不能仅通过增加 worker 获得安全的横向扩展。

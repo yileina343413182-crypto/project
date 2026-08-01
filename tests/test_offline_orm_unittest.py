@@ -14,6 +14,7 @@ from backend.db.session import dispose_sync_engines, get_sync_engine, session_sc
 from batch_predict import fetch_comments, update_predictions
 from crawler.cleaner import get_or_create_anime, init_database, save_to_database
 from scripts.migrate_sqlite_to_mysql import migrate_business_tables
+from scripts.verify_mysql_migration import compare_business_tables
 from topic.keyword_extractor import get_comments_from_db
 from topic.lda_model import save_topics_to_db
 
@@ -93,7 +94,11 @@ class OfflineOrmTest(unittest.TestCase):
             counts = migrate_business_tables(
                 get_sync_engine(db_path=str(self.path)), target_engine, chunk_size=1
             )
+            verified = compare_business_tables(
+                get_sync_engine(db_path=str(self.path)), target_engine
+            )
             self.assertEqual(set(counts), set(Base.metadata.tables))
+            self.assertEqual(set(verified), set(Base.metadata.tables))
             self.assertEqual(counts["anime"], 2)
             with session_scope(db_path=str(target_path)) as target_session:
                 self.assertEqual(
