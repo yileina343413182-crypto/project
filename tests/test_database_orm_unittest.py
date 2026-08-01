@@ -8,8 +8,10 @@ import unittest
 from pathlib import Path
 
 from sqlalchemy import inspect, select
+from sqlalchemy.dialects.mysql import dialect as mysql_dialect
+from sqlalchemy.schema import CreateTable
 
-from backend.db.models import BUSINESS_TABLES, Base, User
+from backend.db.models import BUSINESS_TABLES, Base, Comment, Topic, User
 from backend.db.session import get_async_engine, get_sync_engine
 
 
@@ -50,6 +52,13 @@ class DatabaseOrmTest(unittest.TestCase):
                 await async_engine.dispose()
 
         self.assertEqual(asyncio.run(read_user()), "orm_test")
+
+    def test_mysql_uses_double_for_sqlite_real_compatibility(self):
+        dialect = mysql_dialect()
+        comment_ddl = str(CreateTable(Comment.__table__).compile(dialect=dialect))
+        topic_ddl = str(CreateTable(Topic.__table__).compile(dialect=dialect))
+        self.assertIn("sentiment_score DOUBLE", comment_ddl)
+        self.assertIn("weight DOUBLE", topic_ddl)
 
 
 if __name__ == "__main__":

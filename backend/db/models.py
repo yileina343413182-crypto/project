@@ -23,7 +23,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
-from sqlalchemy.dialects.mysql import LONGTEXT
+from sqlalchemy.dialects.mysql import DOUBLE, LONGTEXT
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.types import TypeDecorator
 
@@ -41,6 +41,7 @@ MYSQL_TABLE_OPTIONS = {
     "mysql_collate": "utf8mb4_0900_ai_ci",
 }
 LONG_TEXT = Text().with_variant(LONGTEXT(), "mysql")
+PRECISE_FLOAT = Float().with_variant(DOUBLE(asdecimal=False), "mysql")
 
 
 class PortableDateTime(TypeDecorator):
@@ -123,7 +124,7 @@ class Comment(Base):
     likes: Mapped[int | None] = mapped_column(Integer, default=0)
     platform: Mapped[str] = mapped_column(String(64), nullable=False)
     sentiment_label: Mapped[str | None] = mapped_column(String(32))
-    sentiment_score: Mapped[float | None] = mapped_column(Float)
+    sentiment_score: Mapped[float | None] = mapped_column(PRECISE_FLOAT)
     model_used: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(PORTABLE_DATETIME, nullable=False, server_default=func.now())
 
@@ -139,7 +140,7 @@ class Topic(Base):
     anime_id: Mapped[int] = mapped_column(ForeignKey("anime.id", ondelete="CASCADE"), nullable=False)
     topic_id: Mapped[int] = mapped_column(Integer, nullable=False)
     keywords: Mapped[Any] = mapped_column(JSON, nullable=False)
-    weight: Mapped[float | None] = mapped_column(Float)
+    weight: Mapped[float | None] = mapped_column(PRECISE_FLOAT)
     created_at: Mapped[datetime] = mapped_column(PORTABLE_DATETIME, nullable=False, server_default=func.now())
 
 
