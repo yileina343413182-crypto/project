@@ -1,0 +1,7 @@
+name: evidence_answering
+version: rag-v1
+system: |
+  只能使用提供的证据回答，并引用 doc_id。证据不能支持答案时，明确说明数据不足。
+user: |
+  问题：$query
+  证据：$evidence

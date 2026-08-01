@@ -1,0 +1,215 @@
+# -*- coding: utf-8 -*-
+"""Deterministic trust-boundary helpers for untrusted LLM context."""
+
+from __future__ import annotations
+
+import re
+from typing import Any
+
+
+_CONTROL_CHARS = re.compile(
+    r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\u200b-\u200f\u202a-\u202e\u2066-\u2069]"
+)
+_SIGNALS = (
+    (
+        "instruction_override",
+        re.compile(
+            r"(?:忽略|无视|绕过|覆盖|忘掉).{0,24}"
+            r"(?:之前|以上|系统|开发者|规则|指令)"
+            r"|ignore.{0,24}(?:previous|prior|system|instructions?)",
+            re.IGNORECASE,
+        ),
+        3,
+    ),
+    (
+        "role_spoofing",
+        re.compile(
+            r"(?:^|\n)\s*(?:system|assistant|developer|tool|系统|开发者)"
+            r"\s*[:：]",
+            re.IGNORECASE,
+        ),
+        2,
+    ),
+    (
+        "prompt_exfiltration",
+        re.compile(
+            r"(?:显示|泄露|输出|告诉).{0,24}"
+            r"(?:system\s*prompt|系统提示|隐藏指令|开发者消息)"
+            r"|(?:reveal|show|print|leak).{0,24}"
+            r"(?:system\s*prompt|hidden\s*instructions?|developer\s*message)",
+            re.IGNORECASE,
+        ),
+        2,
+    ),
+    (
+        "tool_manipulation",
+        re.compile(
+            r"(?:调用|执行|使用).{0,24}(?:工具|函数|tool)"
+            r"|tool[_\s-]?call"
+            r"|update_user_preferences",
+            re.IGNORECASE,
+        ),
+        2,
+    ),
+    (
+        "data_exfiltration",
+        re.compile(
+            r"(?:发送|上传|外传|窃取).{0,32}(?:数据|密钥|token|密码|记录)"
+            r"|(?:send|upload|exfiltrate|steal).{0,32}"
+            r"(?:data|secret|token|password|records?)",
+            re.IGNORECASE,
+        ),
+        3,
+    ),
+    (
+        "encoded_payload",
+        re.compile(r"(?:[A-Za-z0-9+/]{120,}={0,2})"),
+        1,
+    ),
+)
+
+
+def inspect_untrusted_text(
+    value: Any,
+    *,
+    source: str,
+    max_chars: int = 4000,
+) -> dict[str, Any]:
+    text = _CONTROL_CHARS.sub("", str(value or ""))
+    truncated = len(text) > max_chars
+    text = text[:max_chars]
+    flags: list[str] = []
+    score = 0
+    for name, pattern, weight in _SIGNALS:
+        if pattern.search(text):
+            flags.append(name)
+            score += weight
+    risk = "high" if score >= 3 else "medium" if score else "low"
+    return {
+        "source": source,
+        "risk": risk,
+        "flags": flags,
+        "score": score,
+        "truncated": truncated,
+        "sanitized_text": text,
+        "trust_level": "untrusted",
+    }
+
+
+def sanitize_evidence_map(
+    evidence_map: dict[int, list[dict]],
+) -> tuple[dict[int, list[dict]], dict[str, Any]]:
+    cleaned: dict[int, list[dict]] = {}
+    flagged_count = 0
+    filtered_count = 0
+    flags: set[str] = set()
+    for anime_id, items in (evidence_map or {}).items():
+        safe_items = []
+        for item in items or []:
+            inspection = inspect_untrusted_text(
+                item.get("content", ""),
+                source="rag_evidence",
+                max_chars=1200,
+            )
+            flags.update(inspection["flags"])
+            if inspection["flags"]:
+                flagged_count += 1
+            if inspection["risk"] == "high":
+                filtered_count += 1
+                continue
+            metadata = dict(item.get("metadata") or {})
+            metadata["security"] = {
+                "trust_level": "untrusted",
+                "risk": inspection["risk"],
+                "flags": inspection["flags"],
+            }
+            safe_items.append(
+                {
+                    **item,
+                    "content": inspection["sanitized_text"],
+                    "metadata": metadata,
+                }
+            )
+        cleaned[int(anime_id)] = safe_items
+    return cleaned, {
+        "flagged_count": flagged_count,
+        "filtered_count": filtered_count,
+        "flags": sorted(flags),
+    }
+
+
+def sanitize_search_result(result: dict) -> dict:
+    """Sanitize evidence returned by a model-selected read-only search tool."""
+    payload = dict(result or {})
+    evidence = payload.get("evidence")
+    if not isinstance(evidence, list):
+        return payload
+    cleaned, diagnostics = sanitize_evidence_map({0: evidence})
+    payload["evidence"] = cleaned[0]
+    payload["security"] = diagnostics
+    return payload
+
+
+def sanitize_preference_suggestions(
+    updates: dict[str, Any],
+) -> tuple[dict[str, list[str]], dict[str, Any]]:
+    cleaned: dict[str, list[str]] = {}
+    filtered_count = 0
+    flags: set[str] = set()
+    for key, raw_values in (updates or {}).items():
+        values = raw_values if isinstance(raw_values, list) else [raw_values]
+        safe_values = []
+        for value in values[:10]:
+            inspection = inspect_untrusted_text(
+                value,
+                source="model_preference_suggestion",
+                max_chars=80,
+            )
+            flags.update(inspection["flags"])
+            if inspection["risk"] != "low":
+                filtered_count += 1
+                continue
+            text = inspection["sanitized_text"].strip()
+            if text and text not in safe_values:
+                safe_values.append(text)
+        if safe_values:
+            cleaned[str(key)] = safe_values
+    return cleaned, {
+        "filtered_count": filtered_count,
+        "flags": sorted(flags),
+    }
+
+
+def sanitize_comment_groups(
+    comments: dict[str, list[dict]],
+) -> tuple[dict[str, list[dict]], dict[str, Any]]:
+    cleaned: dict[str, list[dict]] = {}
+    flagged_count = 0
+    filtered_count = 0
+    flags: set[str] = set()
+    for label, items in (comments or {}).items():
+        safe_items = []
+        for item in items or []:
+            inspection = inspect_untrusted_text(
+                item.get("content", ""),
+                source="tool_comment",
+                max_chars=600,
+            )
+            flags.update(inspection["flags"])
+            if inspection["flags"]:
+                flagged_count += 1
+            if inspection["risk"] == "high":
+                filtered_count += 1
+                continue
+            safe_items.append(
+                {
+                    **item,
+                    "content": inspection["sanitized_text"],
+                }
+            )
+        cleaned[str(label)] = safe_items
+    return cleaned, {
+        "flagged_count": flagged_count,
+        "filtered_count": filtered_count,
+        "flags": sorted(flags),
+    }

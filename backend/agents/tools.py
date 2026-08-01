@@ -6,7 +6,9 @@ from __future__ import annotations
 import time
 import math
 from difflib import SequenceMatcher
-from typing import Any
+from typing import Annotated, Any
+
+from langgraph.prebuilt import InjectedState
 
 from backend.database import (
     get_all_anime,
@@ -20,6 +22,8 @@ from backend.database import (
 )
 from backend.services.bangumi import search_anime
 from backend.agents.memory import get_user_preferences as load_preferences, update_user_preferences as save_preferences
+from backend.agents.prompt_security import sanitize_search_result
+from backend.rag.retriever import search_evidence
 
 try:
     from langchain_core.tools import tool
@@ -260,6 +264,77 @@ def update_user_preferences_tool(user_id: int, updates: dict) -> dict:
     return save_preferences(user_id, updates)
 
 
+def _recommend_candidate_from_state(state: dict, anime_id: int) -> dict:
+    candidates = {
+        int(candidate["id"]): candidate
+        for candidate in state.get("candidates", [])
+    }
+    if int(anime_id) not in candidates:
+        raise ValueError(f"anime_id {anime_id} is outside the candidate pool")
+    return candidates[int(anime_id)]
+
+
+@tool("inspect_recommendation_candidate")
+def inspect_recommendation_candidate_tool(
+    anime_id: int,
+    state: Annotated[dict, InjectedState],
+) -> dict:
+    """Inspect one allowed recommendation candidate and its prepared evidence."""
+    candidate = _recommend_candidate_from_state(state, anime_id)
+    return {
+        "anime_id": int(anime_id),
+        "name": candidate.get("name", ""),
+        "platform": candidate.get("platform", ""),
+        "comment_count": candidate.get("comment_count", 0),
+        "scores": {
+            key: candidate.get(key, 0)
+            for key in (
+                "match_score",
+                "sentiment_score",
+                "popularity_score",
+                "preference_penalty",
+                "final_score",
+            )
+        },
+        "sentiment": candidate.get("sentiment", {}),
+        "topics": candidate.get("topics", []),
+        "evidence": state.get("evidence_map", {}).get(int(anime_id), []),
+    }
+
+
+@tool("search_candidate_comments")
+def search_candidate_comments_tool(
+    anime_id: int,
+    query: str,
+    state: Annotated[dict, InjectedState],
+) -> dict:
+    """Search local comment evidence for one candidate from the current pool."""
+    _recommend_candidate_from_state(state, anime_id)
+    return sanitize_search_result(
+        search_evidence(query, anime_id=int(anime_id), top_k=3)
+    )
+
+
+@tool("compare_candidate_sentiment")
+def compare_candidate_sentiment_tool(
+    anime_ids: list[int],
+    state: Annotated[dict, InjectedState],
+) -> list[dict]:
+    """Compare sentiment and ranking scores for candidates from the current pool."""
+    result = []
+    for anime_id in anime_ids[:5]:
+        candidate = _recommend_candidate_from_state(state, anime_id)
+        result.append(
+            {
+                "anime_id": int(anime_id),
+                "name": candidate.get("name", ""),
+                "final_score": candidate.get("final_score", 0),
+                "sentiment": candidate.get("sentiment", {}),
+            }
+        )
+    return result
+
+
 OPINION_TOOLS = [
     get_anime_info_tool,
     get_sentiment_stats_tool,
@@ -272,9 +347,7 @@ OPINION_TOOLS = [
 ]
 
 RECOMMEND_TOOLS = [
-    search_anime_candidates_tool,
-    rank_by_sentiment_tool,
-    get_recommendation_evidence_tool,
-    get_user_preferences_tool,
-    update_user_preferences_tool,
+    inspect_recommendation_candidate_tool,
+    search_candidate_comments_tool,
+    compare_candidate_sentiment_tool,
 ]

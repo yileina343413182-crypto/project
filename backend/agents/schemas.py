@@ -50,9 +50,11 @@ class RetrievalEvidence(BaseModel):
 class PromptTrace(BaseModel):
     template_name: str = ""
     template_version: str = ""
+    template_hash: str = ""
     model: str = ""
     retrieval_top_k: int = 0
     fallback: bool = False
+    security: dict[str, Any] = Field(default_factory=dict)
 
 
 class OpinionReportSchema(BaseModel):
@@ -123,6 +125,8 @@ class LLMRecommendationResponse(BaseModel):
 class RecommendationResponseSchema(BaseModel):
     need_clarification: bool = False
     clarifying_question: str = ""
+    preference_stage: str = ""
+    preference_progress: dict[str, Any] = Field(default_factory=dict)
     recommendations: list[AnimeRecommendation] = Field(default_factory=list)
     preference_updates: dict[str, Any] = Field(default_factory=dict)
     evidence_refs: list[str] = Field(default_factory=list)
@@ -135,6 +139,7 @@ class RecommendationResponseSchema(BaseModel):
     evidence_coverage: dict[str, Any] = Field(default_factory=dict)
     context_budget: dict[str, Any] = Field(default_factory=dict)
     validation_warnings: list[str] = Field(default_factory=list)
+    tool_rounds: int = 0
 
 
 class PreferenceSchema(BaseModel):

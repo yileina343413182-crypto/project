@@ -1,0 +1,25 @@
+prompts:
+  anime_comment_summary:
+    versions:
+      v1: 01914ca620902b91eb9d1fa2660ce3bd0d98bac84da71121d4f89d3bf355b383
+  anime_description_knowledge:
+    versions:
+      v1: c469fc40690274f3f0fa238680551d8f46464bc3bc85e2158363cb89976f87a9
+  anime_description_search:
+    versions:
+      v1: a80f5e90f2388497f47ee04c042b1109d3bdb27693a134ce1c9c6e53f4db8b93
+  evidence_answering:
+    versions:
+      rag-v1: 9e31d445cb5fc4a1a22420eeb74156bac79032970f9b488d8279b2ff965e5063
+  opinion_report:
+    versions:
+      rag-v1: c4539d6f4bd8814aa8eb70ee62aa6be9b048229c9ed8bfe626c97fca0418a5df
+      rag-v2-injection-guard: 1df00019796fe2367f2fca28a8daad97a617440cd69d08b5ed5d9b6ca8694110
+  recommendation:
+    versions:
+      rag-v1: 4b3a171cec6338b5398d6ba80370176877b58648a1c12f5f3c6d0e0384f50c92
+      rag-v2-bounded: 2dc0fa51d9a11de5295a7ba4373908fefad6f888ce955de2e33a3fde82b32cd1
+      rag-v3-injection-guard: 05f4a1647d25004d768edcc8a851dcbbdbd5d3ae2bbf6063ca27e05f5b45c4eb
+  recommendation_intent:
+    versions:
+      v1: 55fd14495a37b15aa4be47050f5e67f9034cdde80683d33bfceb550324b9980f

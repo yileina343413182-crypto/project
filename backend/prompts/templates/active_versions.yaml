@@ -1,0 +1,8 @@
+active_versions:
+  anime_comment_summary: v1
+  anime_description_knowledge: v1
+  anime_description_search: v1
+  evidence_answering: rag-v1
+  opinion_report: rag-v2-injection-guard
+  recommendation: rag-v3-injection-guard
+  recommendation_intent: v1

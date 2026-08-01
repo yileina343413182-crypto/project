@@ -4,6 +4,12 @@
 >
 > 毕业设计项目（2026届）· Python 3.12 + Flask 3.0 + Vue 3 + SQLite
 
+> [!IMPORTANT]
+> 当前推荐 Agent 2.0 已迁移为 LangGraph `StateGraph`。运行时 Prompt 由
+> `backend/prompts/registry.py` 加载不可变版本，不再读取
+> `backend/prompts/templates/*.yaml` 形式的旧平铺模板。Prompt 的版本、模板哈希和
+> 安全诊断会随 Agent 任务写入 `prompt_trace`。
+
 ---
 
 ## 目录
@@ -345,6 +351,10 @@
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | POST | `/api/recommend` | `{"query":"用户输入"}` → 动漫推荐卡片 + LLM 生成理由 |
+| POST | `/api/agent/recommend/start` | 启动推荐 Agent 2.0 异步会话 |
+| POST | `/api/agent/recommend/message` | 回答多级偏好问题或继续推荐会话 |
+| GET | `/api/agent/tasks/<task_id>` | 查询异步任务状态与结果 |
+| POST | `/api/agent/opinion/analyze` | 启动舆情诊断 Agent |
 
 #### 历史记录（`/api/history`，均需 JWT）
 
@@ -431,30 +441,40 @@ AI 推荐响应返回一张结构化"推荐卡片"，展示：
 
 ## 13. AI 智能推荐模块
 
-### 13.1 推荐流程（`backend/api/recommend.py` + `backend/services/llm.py`）
+### 13.1 推荐 Agent 2.0 流程
 
-```
-用户输入 query（如"推荐一个科幻机甲动漫"或"进击的巨人怎么样"）
-    ↓
-从数据库获取所有动漫名列表
-    ↓
-[LLM 意图提取] 调用大模型，prompt 包含动漫名列表，
- 要求返回 JSON：{"matched_name": "xxx", "reply": "..."}
-    ↓ LLM 不可用时
-[本地降级] SequenceMatcher 字符相似度模糊匹配（阈值 0.3）
-    ↓
-在数据库中精确/模糊定位目标动漫
-    ↓
-调用 Bangumi API 获取评分和简介
-    ↓
-从数据库聚合"作画/剧情/声优"维度的情感统计
-    ↓
-[LLM 描述生成] 结合评分、情感数据，生成个性化推荐理由
-    ↓
-返回完整推荐卡片（JSON）
+推荐 Agent 2.0 的入口是 `backend/agents/recommend_agent.py`，实际流程定义在
+`backend/agents/recommend_graph.py`：
+
+```mermaid
+flowchart LR
+    A["加载偏好"] --> B["检查用户输入"]
+    B --> C["收集并评估偏好"]
+    C -->|偏好不足| D["逐级追问"]
+    C -->|偏好充分| E["构建候选与检索证据"]
+    E --> F["检查不可信证据"]
+    F --> G["压缩上下文"]
+    G --> H["Agent 决策"]
+    H -->|需要补充只读证据| I["ToolNode"]
+    I --> H
+    H --> J["结构化生成与校验"]
+    J -->|失败| K["修复或本地降级"]
+    J -->|成功| L["返回推荐结果"]
 ```
 
-### 13.2 LLM 接入（`backend/services/llm.py`）
+关键约束：
+
+- 偏好不足时按题材、情绪、节奏等槽位逐级追问，不直接一次性澄清。
+- `RECOMMEND_TOOLS` 仅包含当前候选池内的只读查询工具，由
+  `bind_tools + ToolNode` 执行。
+- `step_count`、`retry_count`、工具轮次和 `recursion_limit` 共同限制循环。
+- SQLite Checkpointer 保存节点状态；节点异常时从最近检查点恢复。
+- 高风险 Prompt 注入输入不触发工具规划，也不能写入持久化偏好。
+- LLM 产生的偏好只作为 `suggested` 返回；只有确定性解析结果可以写入
+  `applied` 偏好。
+- LLM 或证据检索异常均进入可观测的本地降级路径。
+
+### 13.2 PromptOps 与 LLM 接入
 
 采用 **OpenAI 兼容接口格式**，通过 `config.py` 配置可一键切换：
 
@@ -467,6 +487,14 @@ AI 推荐响应返回一张结构化"推荐卡片"，展示：
 - LLM API 不可用（网络超时/无 API Key）时自动降级为本地模糊匹配，系统始终可用
 - 针对 Qwen3 系列默认开启的 `<think>` 思考链标签，自动剥离后取实际回复内容
 - 进程级内存缓存，避免对同一动漫名重复调用 Bangumi API
+- Prompt 存放于 `backend/prompts/templates/<name>/<version>.yaml`
+- `active_versions.yaml` 仅负责选择当前版本，回滚不会覆盖历史模板
+- `manifest.yaml` 保存每个不可变模板的 SHA-256
+- 推荐和舆情 Prompt 将用户输入、历史、评论、RAG 证据及工具结果标记为
+  `UNTRUSTED DATA`
+
+Prompt 版本管理细节见
+[`backend/prompts/README.md`](backend/prompts/README.md)。
 
 ---
 
@@ -597,7 +625,18 @@ project/
 │   │   ├── sentiment.py            # GET /sentiment/stats|trend|scatter, POST /predict
 │   │   ├── topic.py                # GET /topics/<id>, GET /wordcloud/<id>
 │   │   ├── recommend.py            # POST /recommend（LLM 推荐 + Bangumi 评分）
+│   │   ├── agent.py                # 推荐 Agent 2.0 / 舆情 Agent 异步任务 API
+│   │   ├── rag.py                  # RAG 索引、检索与评测 API
 │   │   └── history.py              # POST/GET/DELETE /history/chat（JWT 保护）
+│   ├── agents/
+│   │   ├── recommend_graph.py      # LangGraph StateGraph、节点、边与 Checkpointer
+│   │   ├── prompt_security.py      # 输入、评论、RAG 和工具结果的安全边界
+│   │   ├── opinion_agent.py        # 结构化舆情诊断 Agent
+│   │   └── tools.py                # Agent 工具注册表
+│   ├── prompts/
+│   │   ├── registry.py             # 不可变 Prompt 版本、哈希和原子切换
+│   │   └── templates/              # active_versions、manifest、版本化 YAML
+│   ├── rag/                        # 索引、向量库、检索、存储和评测
 │   └── services/
 │       ├── llm.py                  # LLM 调用封装（智谱/通义，OpenAI 兼容，自动降级）
 │       └── bangumi.py              # Bangumi API 封装（搜索、评分、内存缓存）
@@ -670,7 +709,7 @@ project/
 
 ### 环境要求
 
-- Python 3.10+（推荐 3.12）
+- Python 3.12
 - Node.js 18+
 
 ### 1. 克隆并安装依赖
@@ -679,28 +718,36 @@ project/
 # Windows 建议先切换为 UTF-8 代码页
 chcp 65001
 
+# 本项目约定虚拟环境位于 D:\毕业设计\.venv
+cd D:\毕业设计
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
 cd project
-
-# Python 虚拟环境
-python -m venv .venv
-.venv\Scripts\activate          # Windows
-# source .venv/bin/activate     # Linux/macOS
 
 pip install -r requirements.txt
 ```
 
+若 `.venv` 返回 `Access is denied` 或 `Unable to create process`，先在正常
+PowerShell 中运行 `.venv\Scripts\python.exe --version`，并检查
+`pyvenv.cfg` 指向的基础解释器是否真实存在。Codex 等受限沙箱可能只是不允许
+执行用户目录中的基础 Python；只有正常终端也失败且基础解释器确实不存在时，
+才需要重建虚拟环境。
+
 > **GPU 加速**：如需 GPU 版 PyTorch，参考 https://pytorch.org/get-started/locally/ 替换 `torch` 安装命令。
 
-### 2. 配置 LLM API Key（AI 推荐功能）
+### 2. 配置 LLM 与 Embedding
 
-编辑 `backend/config.py`，填入 API Key：
+不要在代码中写入密钥，使用环境变量：
 
-```python
-LLM_PROVIDER = "qwen"       # "zhipu" 或 "qwen"
-LLM_API_KEY  = "your-api-key-here"
+```powershell
+$env:LLM_PROVIDER="qwen"
+$env:QWEN_API_KEY="your-key"
+$env:EMBEDDING_PROVIDER="qwen"
+$env:EMBEDDING_API_KEY="your-key"
 ```
 
-也可通过环境变量配置：`set LLM_API_KEY=your-key`（不填则 AI 推荐自动降级为本地模糊匹配）
+未配置 LLM 或 Embedding Key 时，推荐与 RAG 分别降级为本地推荐和 SQLite
+关键词检索。
 
 ### 3. 安装前端依赖
 
@@ -728,6 +775,25 @@ npm run dev
 ```
 
 浏览器访问：http://localhost:3000
+
+### 5. 重建 RAG 向量索引
+
+`data/chroma/` 是可重建运行数据，不纳入 Git。索引损坏、Embedding
+provider/model 变化或首次部署时执行：
+
+```powershell
+python rebuild_rag_index.py
+```
+
+也可以在登录后调用 `POST /api/rag/index/rebuild`，再通过
+`GET /api/rag/index/jobs/<job_id>` 检查任务状态。只有任务完成且 collection
+校验成功后才会切换 active collection。
+
+### 6. 自动化测试
+
+```powershell
+python -m unittest discover -s tests -p "test*_unittest.py"
+```
 
 ---
 
@@ -1010,14 +1076,16 @@ python verify_majo.py --dry-run   # 仅测试数据库初始化
 
 ## AI 推荐模块说明
 
-`POST /api/recommend` 的完整流程：
+`POST /api/recommend` 保留为旧版同步兼容接口。新功能使用
+`POST /api/agent/recommend/start` 和 `POST /api/agent/recommend/message`：
 
-1. **意图提取**：LLM 分析用户自然语言输入，从数据库动漫列表中识别目标动漫名（失败时降级为本地字符串模糊匹配）
-2. **数据库匹配**：精确匹配 → 模糊匹配 → Fallback 推荐评论最多的动漫
-3. **Bangumi 评分**：调用 `bgm.tv` API 获取动漫评分、排名、简介
-4. **情感分析整合**：从 `comments` 表聚合正面/中性/负面评论数量及代表性评论
-5. **LLM 生成推荐语**：将以上信息组合为 Prompt，调用 LLM 生成个性化推荐文字
-6. **历史存储**：登录用户的每次问答自动保存到 `chat_history` 表
+1. **安全检查**：检查当前输入与最近会话历史。
+2. **多级偏好补全**：确定性提取并持久化用户明确回答的偏好。
+3. **候选与证据**：本地排序后检索评论证据，并过滤间接 Prompt 注入。
+4. **受限工具循环**：模型只能选择当前候选池内的只读工具。
+5. **结构化校验**：候选 ID、证据引用和返回 Schema 必须通过后端校验。
+6. **降级与恢复**：节点异常从 Checkpointer 恢复；超限或模型失败走本地结果。
+7. **可追溯结果**：保存 Prompt 版本、模板哈希、证据、执行步骤和安全诊断。
 
 ---
 

@@ -53,8 +53,19 @@ def _run_opinion_task(session_id: int, anime_id: int | None, name: str | None, q
     return payload
 
 
-def _run_recommendation_task(user_id: int, session_id: int, message: str, history: list[dict] | None = None) -> dict:
-    result = run_recommendation_agent(user_id, message, history=history or [])
+def _run_recommendation_task(
+    task_id: int,
+    user_id: int,
+    session_id: int,
+    message: str,
+    history: list[dict] | None = None,
+) -> dict:
+    result = run_recommendation_agent(
+        user_id,
+        message,
+        history=history or [],
+        task_id=task_id,
+    )
     payload = {"session_id": session_id, **result}
     content = result["result"].get("clarifying_question") or "推荐结果已生成"
     save_agent_message(session_id, "agent", content, payload)
@@ -92,7 +103,7 @@ def start_recommendation():
     session_id = create_agent_session(user_id, "recommendation", query[:40] or "推荐 Agent 2.0")
     save_agent_message(session_id, "user", query)
     task_id = create_agent_task(user_id, session_id, "recommendation", {"query": query, "history": []})
-    submit_agent_task(task_id, _run_recommendation_task, user_id, session_id, query, [])
+    submit_agent_task(task_id, _run_recommendation_task, task_id, user_id, session_id, query, [])
     return _ok(_task_payload(task_id, session_id))
 
 
@@ -120,7 +131,7 @@ def recommendation_message():
     save_agent_message(session_id, "user", message)
     history = session.get("messages", [])[-8:]
     task_id = create_agent_task(user_id, session_id, "recommendation", {"message": message, "history": history})
-    submit_agent_task(task_id, _run_recommendation_task, user_id, session_id, message, history)
+    submit_agent_task(task_id, _run_recommendation_task, task_id, user_id, session_id, message, history)
     return _ok(_task_payload(task_id, session_id))
 
 

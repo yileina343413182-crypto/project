@@ -10,6 +10,11 @@ from typing import Any
 
 from backend.agents.fallback import build_opinion_fallback
 from backend.agents.model_factory import get_chat_model
+from backend.agents.prompt_security import (
+    inspect_untrusted_text,
+    sanitize_comment_groups,
+    sanitize_evidence_map,
+)
 from backend.config import (
     LLM_MODEL,
     OPINION_LLM_MAX_TOKENS,
@@ -33,13 +38,6 @@ from backend.agents.tools import (
 )
 
 logger = logging.getLogger(__name__)
-
-SYSTEM_PROMPT = """
-你是一个动漫舆情诊断 Agent。你必须基于工具返回的数据生成结论，不能编造不存在的评论、评分或主题。
-你的目标是给出结构化舆情报告：总体口碑、情感概览、正面亮点、负面槽点、主题洞察、风险点、受众画像、运营建议和代表评论。
-所有结论都要能从工具数据中找到依据。若数据不足，请明确指出数据不足。
-输出必须是 JSON，不要解释生成过程。每个数组最多 4 条，每条结论不超过 80 字。
-"""
 
 
 def _dump_schema(value: Any) -> dict:
@@ -237,10 +235,15 @@ def _validate_llm_report(data: dict) -> dict:
     return _dump_schema(report)
 
 
-def _invoke_structured_report(model: Any, prompt: str) -> dict:
+def _invoke_structured_report(
+    model: Any,
+    prompt: str,
+    prompt_template=None,
+) -> dict:
     """Generate the final report without entering a LangGraph agent."""
+    actual_prompt = prompt_template or get_prompt("opinion_report")
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": actual_prompt.render_system()},
         {"role": "user", "content": prompt},
     ]
     errors: list[str] = []
@@ -257,14 +260,11 @@ def _invoke_structured_report(model: Any, prompt: str) -> dict:
 
     json_prompt = (
         f"{prompt}\n\n"
-        "Return one JSON object only. Do not wrap it in Markdown. "
-        "Use these keys exactly: summary, sentiment_overview, positive_points, "
-        "negative_points, topic_insights, risk_points, audience_profile, "
-        "operation_suggestions, representative_comments, evidence_refs."
+        + actual_prompt.render_section("json_retry_suffix")
     )
     try:
         raw = model.invoke([
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": actual_prompt.render_system()},
             {"role": "user", "content": json_prompt},
         ])
         report = _validate_llm_report(_extract_json_object(_message_content(raw)))
@@ -275,8 +275,15 @@ def _invoke_structured_report(model: Any, prompt: str) -> dict:
         raise ValueError("; ".join(errors))
 
 
-def _render_opinion_prompt(query: str, anime: dict, context: dict[str, Any], evidence: list[dict]) -> str:
-    prompt = get_prompt("opinion_report").render(
+def _render_opinion_prompt(
+    query: str,
+    anime: dict,
+    context: dict[str, Any],
+    evidence: list[dict],
+    prompt_template=None,
+) -> str:
+    actual_prompt = prompt_template or get_prompt("opinion_report")
+    prompt = actual_prompt.render(
         query=query or "",
         anime=json.dumps(anime, ensure_ascii=False),
         context=json.dumps(context, ensure_ascii=False),
@@ -287,9 +294,19 @@ def _render_opinion_prompt(query: str, anime: dict, context: dict[str, Any], evi
     return prompt[:OPINION_PROMPT_MAX_CHARS].rstrip() + "\n\n[context truncated]"
 
 
-def _invoke_opinion_attempt(model: Any, prompt: str, step_name: str, detail: str) -> tuple[dict, dict]:
+def _invoke_opinion_attempt(
+    model: Any,
+    prompt: str,
+    step_name: str,
+    detail: str,
+    prompt_template=None,
+) -> tuple[dict, dict]:
     start = time.perf_counter()
-    report_data = _invoke_structured_report(model, prompt)
+    report_data = _invoke_structured_report(
+        model,
+        prompt,
+        prompt_template,
+    )
     generation_mode = report_data.pop("_generation_mode", "schema_or_json")
     step = {
         "name": step_name,
@@ -345,10 +362,43 @@ def analyze_public_opinion(anime_id: int | None = None, name: str | None = None,
             "error": "未找到匹配的动漫",
         }
 
-    retrieval = search_evidence(query or anime["name"], anime_id=anime["id"], top_k=6)
-    evidence = retrieval.get("evidence", [])
+    safe_comments, comment_security = sanitize_comment_groups(
+        context.get("comments", {})
+    )
+    context = {**context, "comments": safe_comments}
+    input_security = inspect_untrusted_text(
+        query,
+        source="user_input",
+        max_chars=1200,
+    )
+    retrieval = search_evidence(
+        input_security["sanitized_text"] or anime["name"],
+        anime_id=anime["id"],
+        top_k=6,
+    )
+    raw_evidence = retrieval.get("evidence", [])
+    cleaned_evidence, evidence_security = sanitize_evidence_map(
+        {int(anime["id"]): raw_evidence}
+    )
+    evidence = cleaned_evidence[int(anime["id"])]
     refs = evidence_doc_ids(evidence)
-    trace = prompt_trace("opinion_report", LLM_MODEL, retrieval.get("top_k", 6), retrieval.get("fallback", True))
+    prompt_template = get_prompt("opinion_report")
+    trace = prompt_trace(
+        "opinion_report",
+        LLM_MODEL,
+        retrieval.get("top_k", 6),
+        retrieval.get("fallback", True),
+        prompt=prompt_template,
+    )
+    trace["security"] = {
+        "input": {
+            key: value
+            for key, value in input_security.items()
+            if key != "sanitized_text"
+        },
+        "evidence": evidence_security,
+        "tool_comments": comment_security,
+    }
     steps.append({
         "name": "rag_retrieve" if not retrieval.get("fallback") else "rag_fallback_keyword",
         "status": "success" if evidence else "fallback",
@@ -370,16 +420,27 @@ def analyze_public_opinion(anime_id: int | None = None, name: str | None = None,
 
     compact_context, compact_evidence = build_compact_opinion_context(context, evidence)
     try:
-        prompt = _render_opinion_prompt(query or "", anime, compact_context, compact_evidence)
+        prompt = _render_opinion_prompt(
+            query or "",
+            anime,
+            compact_context,
+            compact_evidence,
+            prompt_template,
+        )
         report_data, success_step = _invoke_opinion_attempt(
             model,
             prompt,
             "structured_opinion_report",
             "LLM generated schema report from compact prefetched context and RAG evidence",
+            prompt_template,
         )
         steps.append(success_step)
         report_data["fallback"] = False
-        report_data["evidence_refs"] = report_data.get("evidence_refs") or refs
+        report_data["evidence_refs"] = [
+            ref
+            for ref in report_data.get("evidence_refs", [])
+            if ref in set(refs)
+        ] or refs
         report_data["retrieval_evidence"] = evidence
         report_data["prompt_trace"] = trace
         report_data["agent_steps"] = steps + report_data.get("agent_steps", [])
@@ -412,16 +473,27 @@ def analyze_public_opinion(anime_id: int | None = None, name: str | None = None,
         max_tokens=OPINION_LLM_REPAIR_MAX_TOKENS,
     ) or model
     try:
-        retry_prompt = _render_opinion_prompt(query or "", anime, retry_context, retry_evidence)
+        retry_prompt = _render_opinion_prompt(
+            query or "",
+            anime,
+            retry_context,
+            retry_evidence,
+            prompt_template,
+        )
         report_data, retry_step = _invoke_opinion_attempt(
             retry_model,
             retry_prompt,
             "structured_opinion_report_compact_retry",
             "LLM generated schema report after tighter compact retry",
+            prompt_template,
         )
         steps.append(retry_step)
         report_data["fallback"] = False
-        report_data["evidence_refs"] = report_data.get("evidence_refs") or refs
+        report_data["evidence_refs"] = [
+            ref
+            for ref in report_data.get("evidence_refs", [])
+            if ref in set(refs)
+        ] or refs
         report_data["retrieval_evidence"] = evidence
         report_data["prompt_trace"] = trace
         report_data["agent_steps"] = steps + report_data.get("agent_steps", [])
