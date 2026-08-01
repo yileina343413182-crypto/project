@@ -5,19 +5,20 @@ AI 推荐 API
 """
 
 import logging
-from flask import Blueprint, request, jsonify
+from fastapi import APIRouter, Body
 
+from backend.api.common import error_response, ok
 from backend.database import get_all_anime, get_aspect_sentiment
 from backend.services.bangumi import search_anime
 from backend.services.llm import extract_recommendation_intent, generate_anime_description
 
 logger = logging.getLogger(__name__)
 
-recommend_bp = Blueprint("recommend", __name__)
+router = APIRouter()
 
 
-@recommend_bp.route("/api/recommend", methods=["POST"])
-def recommend():
+@router.post("/api/recommend")
+def recommend(body: dict | None = Body(default=None)):
     """
     AI 推荐接口
 
@@ -45,25 +46,25 @@ def recommend():
           }
         }
     """
-    body = request.get_json(silent=True) or {}
+    body = body or {}
     query = (body.get("query") or "").strip()
 
     if not query:
-        return jsonify({"code": 400, "msg": "query 不能为空", "data": None}), 400
+        return error_response("query 不能为空")
 
     # 1. 获取数据库动漫列表
     anime_list = get_all_anime()
     if not anime_list:
-        return jsonify({
-            "code": 200, "msg": "ok",
-            "data": {
+        return ok(
+            {
                 "anime_id": None, "name": None,
                 "llm_reply": "数据库中暂无动漫数据，请先运行 generate_demo_data.py。",
                 "description": "", "bangumi_rating": 0,
                 "aspect_sentiment": {}, "match_type": "fallback",
                 "platform": "", "comment_count": 0,
             },
-        })
+            msg="ok",
+        )
 
     anime_name_list = [a["name"] for a in anime_list]
 
@@ -105,10 +106,8 @@ def recommend():
     # 5. 三维情感分析
     aspect_sentiment = get_aspect_sentiment(target_anime["id"])
 
-    return jsonify({
-        "code": 200,
-        "msg": "ok",
-        "data": {
+    return ok(
+        {
             "anime_id": target_anime["id"],
             "name": target_anime["name"],
             "platform": target_anime["platform"],
@@ -119,4 +118,5 @@ def recommend():
             "llm_reply": intent["reply"],
             "match_type": match_type,
         },
-    })
+        msg="ok",
+    )

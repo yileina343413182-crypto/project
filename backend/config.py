@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
-"""
-Flask 后端配置
-"""
+"""后端配置。"""
 
 import os
 
@@ -34,7 +32,10 @@ def _get_cors_origins():
     return [origin.strip() for origin in value.split(",") if origin.strip()]
 
 # 数据库
-DB_PATH = os.path.join(PROJECT_ROOT, "data", "anime_sentiment.db")
+DB_PATH = os.environ.get(
+    "DATABASE_PATH",
+    os.path.join(PROJECT_ROOT, "data", "anime_sentiment.db"),
+).strip()
 
 # 模型路径
 TEXTCNN_MODEL_DIR = os.path.join(PROJECT_ROOT, "models", "saved", "textcnn")
@@ -46,10 +47,10 @@ DEFAULT_MODEL = "bert"  # textcnn 或 bert
 # 停用词
 STOPWORDS_PATH = os.path.join(PROJECT_ROOT, "data", "stopwords.txt")
 
-# Flask
-DEBUG = _get_bool_env("FLASK_DEBUG", True)
-HOST = os.environ.get("FLASK_HOST", "0.0.0.0")
-PORT = _get_int_env("FLASK_PORT", 5000)
+# ASGI 服务；保留 FLASK_* 环境变量作为迁移期兼容入口。
+DEBUG = _get_bool_env("APP_DEBUG", _get_bool_env("FLASK_DEBUG", True))
+HOST = os.environ.get("APP_HOST", os.environ.get("FLASK_HOST", "0.0.0.0"))
+PORT = _get_int_env("APP_PORT", _get_int_env("FLASK_PORT", 5000))
 
 # CORS 跨域
 CORS_ORIGINS = _get_cors_origins()
@@ -180,5 +181,5 @@ if not JWT_SECRET_KEY:
     if DEBUG:
         JWT_SECRET_KEY = "dev-only-change-me"
     else:
-        raise RuntimeError("JWT_SECRET_KEY must be set when FLASK_DEBUG is disabled")
+        raise RuntimeError("JWT_SECRET_KEY must be set when debug mode is disabled")
 JWT_ACCESS_TOKEN_EXPIRES = _get_int_env("JWT_ACCESS_TOKEN_EXPIRES", 86400)  # 默认24小时（秒）

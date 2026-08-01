@@ -1,2 +1,2 @@
 # -*- coding: utf-8 -*-
-"""Flask 后端包"""
+"""FastAPI 后端包。"""

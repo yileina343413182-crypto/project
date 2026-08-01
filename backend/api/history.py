@@ -7,67 +7,61 @@ GET    /api/history/chat        — 分页获取当前用户历史
 DELETE /api/history/chat/<id>   — 删除指定历史条目
 """
 
-from flask import Blueprint, request, jsonify
-from flask_jwt_extended import jwt_required, get_jwt_identity
+from fastapi import APIRouter, Body, Depends, Query
 
+from backend.api.common import error_response, ok
 from backend.database import save_chat_message, get_chat_history, delete_chat_message
+from backend.security import get_current_user_id
 
-history_bp = Blueprint("history", __name__, url_prefix="/api/history")
-
-
-def _ok(data=None, msg="success"):
-    return jsonify({"code": 200, "msg": msg, "data": data})
+router = APIRouter(prefix="/api/history")
 
 
-def _err(msg, code=400):
-    return jsonify({"code": code, "msg": msg, "data": None}), code
-
-
-@history_bp.route("/chat", methods=["POST"])
-@jwt_required()
-def save_history():
+@router.post("/chat")
+def save_history(
+    body: dict | None = Body(default=None),
+    user_id: int = Depends(get_current_user_id),
+):
     """
     保存一次完整的问答记录（用户问 + AI答，合并为一条记录）
     Body: { user_content, ai_content, anime_card(可选) }
     """
-    user_id = int(get_jwt_identity())
-    body = request.get_json(silent=True) or {}
+    body = body or {}
 
     user_content = (body.get("user_content") or "").strip()
     ai_content = (body.get("ai_content") or "").strip()
     anime_card = body.get("anime_card")  # dict or None
 
     if not user_content or not ai_content:
-        return _err("user_content 和 ai_content 不能为空")
+        return error_response("user_content 和 ai_content 不能为空")
 
     # 将用户问和AI答各保存一条（同一user_id）
     save_chat_message(user_id, "user", user_content)
     msg_id = save_chat_message(user_id, "ai", ai_content, anime_card)
 
-    return _ok({"msg_id": msg_id}, msg="保存成功")
+    return ok({"msg_id": msg_id}, msg="保存成功")
 
 
-@history_bp.route("/chat", methods=["GET"])
-@jwt_required()
-def list_history():
+@router.get("/chat")
+def list_history(
+    page: str = Query(default="1"),
+    page_size: str = Query(default="20"),
+    user_id: int = Depends(get_current_user_id),
+):
     """获取当前用户的聊天历史（分页）"""
-    user_id = int(get_jwt_identity())
     try:
-        page = max(1, int(request.args.get("page", 1)))
-        page_size = min(50, max(1, int(request.args.get("page_size", 20))))
+        page = max(1, int(page))
+        page_size = min(50, max(1, int(page_size)))
     except (ValueError, TypeError):
         page, page_size = 1, 20
 
     result = get_chat_history(user_id, page=page, page_size=page_size)
-    return _ok(result)
+    return ok(result)
 
 
-@history_bp.route("/chat/<int:msg_id>", methods=["DELETE"])
-@jwt_required()
-def delete_history(msg_id):
+@router.delete("/chat/{msg_id}")
+def delete_history(msg_id: int, user_id: int = Depends(get_current_user_id)):
     """删除指定历史条目（只能删自己的）"""
-    user_id = int(get_jwt_identity())
     affected = delete_chat_message(msg_id, user_id)
     if affected == 0:
-        return _err("记录不存在或无权删除", 404)
-    return _ok(msg="删除成功")
+        return error_response("记录不存在或无权删除", 404)
+    return ok(msg="删除成功")

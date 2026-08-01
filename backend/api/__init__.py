@@ -1,2 +1,2 @@
 # -*- coding: utf-8 -*-
-"""API Blueprint 包"""
+"""FastAPI APIRouter 包。"""
