@@ -7,27 +7,30 @@
     GET /api/comments/<anime_id>         → 分页查询评论
 """
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.api.common import ok
-from backend.database import get_all_anime, get_comments
+from backend.db.async_repository import get_all_anime, get_comments
+from backend.db.session import get_async_session
 
 router = APIRouter()
 
 
 @router.get("/api/anime/list")
-def anime_list():
+async def anime_list(session: AsyncSession = Depends(get_async_session)):
     """获取所有动漫列表"""
-    data = get_all_anime()
+    data = await get_all_anime(session)
     return ok(data)
 
 
 @router.get("/api/comments/{anime_id}")
-def comments(
+async def comments(
     anime_id: int,
     sentiment: str | None = Query(default=None),
     page: int = Query(default=1),
     size: int = Query(default=20),
+    session: AsyncSession = Depends(get_async_session),
 ):
     """
     分页查询评论
@@ -45,5 +48,5 @@ def comments(
     if sentiment and sentiment not in ("positive", "negative", "neutral"):
         sentiment = None
 
-    data = get_comments(anime_id, sentiment=sentiment, page=page, page_size=size)
+    data = await get_comments(session, anime_id, sentiment=sentiment, page=page, page_size=size)
     return ok(data)

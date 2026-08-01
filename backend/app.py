@@ -39,6 +39,7 @@ from backend.database import init_user_tables
 from backend.agents.memory import init_agent_tables
 from backend.rag.storage import init_rag_tables
 from backend.config import CORS_ORIGINS, DEBUG, HOST, PORT
+from backend.db.session import dispose_async_engines, dispose_sync_engines
 
 # 日志配置
 logging.basicConfig(
@@ -56,6 +57,8 @@ async def _lifespan(_app: FastAPI):
     init_agent_tables()
     init_rag_tables()
     yield
+    await dispose_async_engines()
+    dispose_sync_engines()
 
 
 def create_app() -> FastAPI:

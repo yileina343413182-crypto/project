@@ -9,17 +9,19 @@ from difflib import SequenceMatcher
 from typing import Annotated, Any
 
 from langgraph.prebuilt import InjectedState
+from sqlalchemy import func, select
 
 from backend.database import (
     get_all_anime,
     get_aspect_sentiment,
     get_comments,
-    get_db,
     get_sentiment_stats,
     get_sentiment_trend,
     get_topics,
     get_wordcloud_data,
 )
+from backend.database import orm_session
+from backend.db.models import Comment
 from backend.services.bangumi import search_anime
 from backend.agents.memory import get_user_preferences as load_preferences, update_user_preferences as save_preferences
 from backend.agents.prompt_security import sanitize_search_result
@@ -79,19 +81,31 @@ def fetch_anime_info(anime_id: int | None = None, name: str | None = None) -> di
 
 
 def fetch_representative_comments(anime_id: int, limit_per_label: int = 3) -> dict[str, list[dict]]:
-    conn = get_db()
     result: dict[str, list[dict]] = {}
-    for label in ("positive", "neutral", "negative"):
-        rows = conn.execute(
-            """SELECT content, sentiment_label, sentiment_score, likes, platform, publish_time
-               FROM comments
-               WHERE anime_id = ? AND sentiment_label = ? AND content != ''
-               ORDER BY likes DESC, LENGTH(content) DESC, id ASC
-               LIMIT ?""",
-            (anime_id, label, limit_per_label),
-        ).fetchall()
-        result[label] = [dict(row) for row in rows]
-    conn.close()
+    with orm_session() as session:
+        for label in ("positive", "neutral", "negative"):
+            rows = session.execute(
+                select(
+                    Comment.content,
+                    Comment.sentiment_label,
+                    Comment.sentiment_score,
+                    Comment.likes,
+                    Comment.platform,
+                    Comment.publish_time,
+                )
+                .where(
+                    Comment.anime_id == anime_id,
+                    Comment.sentiment_label == label,
+                    Comment.content != "",
+                )
+                .order_by(Comment.likes.desc(), func.length(Comment.content).desc(), Comment.id)
+                .limit(limit_per_label)
+            ).mappings().all()
+            result[label] = []
+            for row in rows:
+                item = dict(row)
+                item["publish_time"] = str(item["publish_time"] or "")
+                result[label].append(item)
     return result
 
 
@@ -100,14 +114,12 @@ def fetch_bangumi_info(name: str) -> dict:
     return data or {"bgm_id": None, "name": name, "summary": "", "rating": 0, "image": ""}
 
 def _get_sentiment_stats_map() -> dict[int, dict[str, int]]:
-    conn = get_db()
-    rows = conn.execute(
-        """SELECT anime_id, sentiment_label, COUNT(*) as cnt
-           FROM comments
-           WHERE sentiment_label IS NOT NULL
-           GROUP BY anime_id, sentiment_label"""
-    ).fetchall()
-    conn.close()
+    with orm_session() as session:
+        rows = session.execute(
+            select(Comment.anime_id, Comment.sentiment_label, func.count().label("cnt"))
+            .where(Comment.sentiment_label.is_not(None))
+            .group_by(Comment.anime_id, Comment.sentiment_label)
+        ).mappings().all()
 
     stats_map: dict[int, dict[str, int]] = {}
     for row in rows:

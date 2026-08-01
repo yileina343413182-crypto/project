@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 import json
+from sqlalchemy import or_, select
 
-from backend.database import get_db, get_sentiment_stats, get_topics
+from backend.database import get_sentiment_stats, get_topics, orm_session
+from backend.db.models import Anime, Comment
 from backend.rag.embeddings import EMBEDDING_MODEL, EMBEDDING_PROVIDER, EmbeddingClient
 from backend.rag.storage import get_active_collection, get_collection_metadata, keyword_search_documents, query_terms
 from backend.rag.vector_store import ChromaVectorStore
@@ -68,26 +70,30 @@ def _normalize_evidence(evidence: list[dict]) -> list[dict]:
 
 
 def _live_database_evidence(query: str, anime_id: int | None = None, top_k: int = 6) -> list[dict]:
-    conn = get_db()
-    params = []
-    where = "content != ''"
+    filters = [Comment.content != ""]
     if anime_id is not None:
-        where += " AND anime_id = ?"
-        params.append(anime_id)
+        filters.append(Comment.anime_id == anime_id)
     terms = query_terms(query)
     if terms:
-        where += " AND (" + " OR ".join("content LIKE ?" for _ in terms[:8]) + ")"
-        params.extend(f"%{term}%" for term in terms[:8])
-    rows = conn.execute(
-        f"""SELECT c.id, c.anime_id, a.name AS anime_name, c.content, c.sentiment_label,
-                  c.sentiment_score, c.likes, c.platform, c.publish_time
-            FROM comments c
-            JOIN anime a ON a.id = c.anime_id
-            WHERE {where}
-            ORDER BY c.likes DESC, c.id ASC LIMIT ?""",
-        params + [top_k],
-    ).fetchall()
-    conn.close()
+        filters.append(or_(*(Comment.content.like(f"%{term}%") for term in terms[:8])))
+    with orm_session() as session:
+        rows = session.execute(
+            select(
+                Comment.id,
+                Comment.anime_id,
+                Anime.name.label("anime_name"),
+                Comment.content,
+                Comment.sentiment_label,
+                Comment.sentiment_score,
+                Comment.likes,
+                Comment.platform,
+                Comment.publish_time,
+            )
+            .join(Anime, Anime.id == Comment.anime_id)
+            .where(*filters)
+            .order_by(Comment.likes.desc(), Comment.id)
+            .limit(top_k)
+        ).mappings().all()
 
     evidence = []
     for rank, row in enumerate(rows, start=1):
@@ -101,7 +107,7 @@ def _live_database_evidence(query: str, anime_id: int | None = None, top_k: int 
             "sentiment_score": row["sentiment_score"] or 0,
             "likes": row["likes"] or 0,
             "platform": row["platform"] or "",
-            "publish_time": row["publish_time"] or "",
+            "publish_time": str(row["publish_time"] or ""),
         }
         evidence.append({
             "content": row["content"],

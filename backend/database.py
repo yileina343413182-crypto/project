@@ -1,501 +1,339 @@
 # -*- coding: utf-8 -*-
-"""
-数据库操作封装
+"""Shared SQLAlchemy CRUD used by synchronous Agent and offline paths."""
 
-提供所有CRUD操作函数，供API层调用。
-"""
+from __future__ import annotations
 
-import os
 import json
-import sqlite3
-import logging
 from collections import Counter
+from contextlib import contextmanager
+from datetime import date, datetime
 
 import jieba
+from sqlalchemy import delete, func, or_, select
 
-from backend.config import DB_PATH, STOPWORDS_PATH
+from backend.config import STOPWORDS_PATH
+from backend.db.models import Anime, ChatHistory, Comment, Topic, User
+from backend.db.session import get_sync_engine, session_scope
 
-logger = logging.getLogger(__name__)
+
+def _date_value(value):
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d %H:%M:%S")
+    if isinstance(value, date):
+        return value.isoformat()
+    return value
 
 
-def get_db(db_path=None):
-    """获取数据库连接"""
-    if db_path is None:
-        db_path = DB_PATH
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    return conn
+def _json_value(value, default=None):
+    if value is None:
+        return default
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except (TypeError, ValueError):
+            return default
+    return value
+
+
+@contextmanager
+def orm_session(db_path: str | None = None):
+    """Open one synchronous Session for one thread/transaction."""
+    with session_scope(db_path=db_path) as session:
+        yield session
 
 
 def init_user_tables(db_path=None):
-    """初始化用户相关表（首次启动时自动建表）"""
-    conn = get_db(db_path)
-    cur = conn.cursor()
-    cur.executescript("""
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT NOT NULL UNIQUE,
-            password_hash TEXT NOT NULL,
-            created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
-        );
+    engine = get_sync_engine(db_path=db_path) if db_path else get_sync_engine()
+    User.metadata.create_all(
+        engine,
+        tables=[User.__table__, ChatHistory.__table__],
+        checkfirst=True,
+    )
 
-        CREATE TABLE IF NOT EXISTS chat_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            role TEXT NOT NULL,
-            content TEXT NOT NULL,
-            anime_card TEXT,
-            created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
-            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-        );
-    """)
-    conn.commit()
-    conn.close()
-
-
-# ===================== 用户账号 =====================
 
 def create_user(username, password_hash):
-    """创建新用户，返回用户id"""
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO users (username, password_hash) VALUES (?, ?)",
-        (username, password_hash)
-    )
-    conn.commit()
-    user_id = cur.lastrowid
-    conn.close()
-    return user_id
+    with orm_session() as session:
+        user = User(username=username, password_hash=password_hash)
+        session.add(user)
+        session.flush()
+        return user.id
 
 
 def get_user_by_username(username):
-    """按用户名查询用户，返回 dict 或 None"""
-    conn = get_db()
-    cur = conn.cursor()
-    row = cur.execute(
-        "SELECT id, username, password_hash, created_at FROM users WHERE username = ?",
-        (username,)
-    ).fetchone()
-    conn.close()
-    if row is None:
-        return None
-    return dict(row)
+    with orm_session() as session:
+        user = session.scalar(select(User).where(User.username == username))
+        if user is None:
+            return None
+        return {
+            "id": user.id,
+            "username": user.username,
+            "password_hash": user.password_hash,
+            "created_at": _date_value(user.created_at),
+        }
 
 
 def get_user_by_id(user_id):
-    """按id查询用户，返回 dict 或 None"""
-    conn = get_db()
-    cur = conn.cursor()
-    row = cur.execute(
-        "SELECT id, username, created_at FROM users WHERE id = ?",
-        (user_id,)
-    ).fetchone()
-    conn.close()
-    if row is None:
-        return None
-    return dict(row)
+    with orm_session() as session:
+        user = session.get(User, user_id)
+        if user is None:
+            return None
+        return {
+            "id": user.id,
+            "username": user.username,
+            "created_at": _date_value(user.created_at),
+        }
 
-
-# ===================== 聊天历史 =====================
 
 def save_chat_message(user_id, role, content, anime_card=None):
-    """保存一条聊天消息，返回消息id"""
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO chat_history (user_id, role, content, anime_card) VALUES (?, ?, ?, ?)",
-        (user_id, role, content, json.dumps(anime_card, ensure_ascii=False) if anime_card else None)
-    )
-    conn.commit()
-    msg_id = cur.lastrowid
-    conn.close()
-    return msg_id
+    with orm_session() as session:
+        message = ChatHistory(
+            user_id=user_id,
+            role=role,
+            content=content,
+            anime_card=anime_card,
+        )
+        session.add(message)
+        session.flush()
+        return message.id
+
+
+def save_chat_exchange(user_id, user_content, ai_content, anime_card=None):
+    """Save both sides of one exchange atomically and return the AI row id."""
+    with orm_session() as session:
+        session.add(ChatHistory(user_id=user_id, role="user", content=user_content))
+        answer = ChatHistory(
+            user_id=user_id,
+            role="ai",
+            content=ai_content,
+            anime_card=anime_card,
+        )
+        session.add(answer)
+        session.flush()
+        return answer.id
 
 
 def get_chat_history(user_id, page=1, page_size=20):
-    """分页获取用户聊天历史（按时间倒序），返回 {items, total, page, page_size}"""
-    conn = get_db()
-    cur = conn.cursor()
-
-    total = cur.execute(
-        "SELECT COUNT(*) FROM chat_history WHERE user_id = ?", (user_id,)
-    ).fetchone()[0]
-
     offset = (page - 1) * page_size
-    rows = cur.execute(
-        """SELECT id, role, content, anime_card, created_at
-           FROM chat_history
-           WHERE user_id = ?
-           ORDER BY created_at DESC, id DESC
-           LIMIT ? OFFSET ?""",
-        (user_id, page_size, offset)
-    ).fetchall()
-
-    conn.close()
-
-    items = []
-    for r in rows:
-        card = None
-        if r["anime_card"]:
-            try:
-                card = json.loads(r["anime_card"])
-            except Exception:
-                pass
-        items.append({
-            "id": r["id"],
-            "role": r["role"],
-            "content": r["content"],
-            "anime_card": card,
-            "created_at": r["created_at"],
-        })
-
+    with orm_session() as session:
+        total = session.scalar(
+            select(func.count()).select_from(ChatHistory).where(ChatHistory.user_id == user_id)
+        ) or 0
+        rows = session.scalars(
+            select(ChatHistory)
+            .where(ChatHistory.user_id == user_id)
+            .order_by(ChatHistory.created_at.desc(), ChatHistory.id.desc())
+            .limit(page_size)
+            .offset(offset)
+        ).all()
+        items = [
+            {
+                "id": row.id,
+                "role": row.role,
+                "content": row.content,
+                "anime_card": _json_value(row.anime_card),
+                "created_at": _date_value(row.created_at),
+            }
+            for row in rows
+        ]
     return {"items": items, "total": total, "page": page, "page_size": page_size}
 
 
 def delete_chat_message(msg_id, user_id):
-    """删除聊天消息（只能删除自己的），返回受影响行数"""
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute(
-        "DELETE FROM chat_history WHERE id = ? AND user_id = ?",
-        (msg_id, user_id)
-    )
-    conn.commit()
-    affected = cur.rowcount
-    conn.close()
-    return affected
+    with orm_session() as session:
+        result = session.execute(
+            delete(ChatHistory).where(
+                ChatHistory.id == msg_id,
+                ChatHistory.user_id == user_id,
+            )
+        )
+        return result.rowcount
 
 
 def _load_stopwords():
-    """加载停用词"""
     stopwords = set()
     try:
-        with open(STOPWORDS_PATH, "r", encoding="utf-8") as f:
-            for line in f:
-                w = line.strip()
-                if w:
-                    stopwords.add(w)
+        with open(STOPWORDS_PATH, "r", encoding="utf-8") as file:
+            for line in file:
+                word = line.strip()
+                if word:
+                    stopwords.add(word)
     except FileNotFoundError:
         pass
     return stopwords
 
 
-# ===================== 动漫列表 =====================
-
 def get_all_anime():
-    """
-    获取所有动漫列表
+    statement = (
+        select(
+            Anime.id,
+            Anime.name,
+            Anime.platform,
+            func.count(Comment.id).label("comment_count"),
+        )
+        .outerjoin(Comment, Anime.id == Comment.anime_id)
+        .group_by(Anime.id, Anime.name, Anime.platform)
+        .order_by(Anime.id)
+    )
+    with orm_session() as session:
+        return [dict(row) for row in session.execute(statement).mappings().all()]
 
-    Returns:
-        list[dict]: [{id, name, platform, comment_count}, ...]
-    """
-    conn = get_db()
-    cur = conn.cursor()
-
-    rows = cur.execute("""
-        SELECT a.id, a.name, a.platform,
-               COUNT(c.id) as comment_count
-        FROM anime a
-        LEFT JOIN comments c ON a.id = c.anime_id
-        GROUP BY a.id
-        ORDER BY a.id
-    """).fetchall()
-
-    result = []
-    for r in rows:
-        result.append({
-            "id": r["id"],
-            "name": r["name"],
-            "platform": r["platform"],
-            "comment_count": r["comment_count"]
-        })
-
-    conn.close()
-    return result
-
-
-# ===================== 评论查询 =====================
 
 def get_comments(anime_id, sentiment=None, page=1, page_size=20):
-    """
-    分页查询评论
-
-    Args:
-        anime_id: 动漫ID
-        sentiment: 情感标签过滤 (positive/negative/neutral/None)
-        page: 页码（从1开始）
-        page_size: 每页大小
-
-    Returns:
-        dict: {total, page, page_size, items: [{id, content, sentiment_label, likes, publish_time}, ...]}
-    """
-    conn = get_db()
-    cur = conn.cursor()
-
-    # 构建查询
-    where = "WHERE anime_id = ?"
-    params = [anime_id]
-
+    filters = [Comment.anime_id == anime_id]
     if sentiment:
-        where += " AND sentiment_label = ?"
-        params.append(sentiment)
-
-    # 总数
-    total = cur.execute(
-        "SELECT COUNT(*) FROM comments " + where, params
-    ).fetchone()[0]
-
-    # 分页
+        filters.append(Comment.sentiment_label == sentiment)
     offset = (page - 1) * page_size
-    rows = cur.execute(
-        "SELECT id, content, sentiment_label, sentiment_score, likes, publish_time, platform "
-        "FROM comments " + where + " ORDER BY id ASC LIMIT ? OFFSET ?",
-        params + [page_size, offset]
-    ).fetchall()
-
+    with orm_session() as session:
+        total = session.scalar(
+            select(func.count()).select_from(Comment).where(*filters)
+        ) or 0
+        rows = session.execute(
+            select(
+                Comment.id,
+                Comment.content,
+                Comment.sentiment_label,
+                Comment.sentiment_score,
+                Comment.likes,
+                Comment.publish_time,
+                Comment.platform,
+            )
+            .where(*filters)
+            .order_by(Comment.id)
+            .limit(page_size)
+            .offset(offset)
+        ).mappings().all()
     items = []
-    for i, r in enumerate(rows):
-        items.append({
-            "seq": offset + i + 1,
-            "id": r["id"],
-            "content": r["content"],
-            "sentiment_label": r["sentiment_label"],
-            "sentiment_score": r["sentiment_score"],
-            "likes": r["likes"],
-            "publish_time": r["publish_time"],
-            "platform": r["platform"]
-        })
+    for index, row in enumerate(rows):
+        item = dict(row)
+        item["seq"] = offset + index + 1
+        item["publish_time"] = _date_value(item["publish_time"])
+        items.append(item)
+    return {"total": total, "page": page, "page_size": page_size, "items": items}
 
-    conn.close()
-    return {
-        "total": total,
-        "page": page,
-        "page_size": page_size,
-        "items": items
-    }
-
-
-# ===================== 情感统计 =====================
 
 def get_sentiment_stats(anime_id):
-    """
-    获取情感统计（饼图数据）
-
-    Returns:
-        dict: {positive: 数量, negative: 数量, neutral: 数量, total: 总数}
-    """
-    conn = get_db()
-    cur = conn.cursor()
-
-    rows = cur.execute(
-        "SELECT sentiment_label, COUNT(*) as cnt "
-        "FROM comments WHERE anime_id = ? AND sentiment_label IS NOT NULL "
-        "GROUP BY sentiment_label",
-        (anime_id,)
-    ).fetchall()
-
+    with orm_session() as session:
+        rows = session.execute(
+            select(Comment.sentiment_label, func.count().label("cnt"))
+            .where(Comment.anime_id == anime_id, Comment.sentiment_label.is_not(None))
+            .group_by(Comment.sentiment_label)
+        ).all()
     stats = {"positive": 0, "negative": 0, "neutral": 0}
-    for r in rows:
-        label = r["sentiment_label"]
+    for label, count in rows:
         if label in stats:
-            stats[label] = r["cnt"]
-
+            stats[label] = count
     stats["total"] = sum(stats.values())
-    conn.close()
     return stats
 
 
 def get_sentiment_scatter(anime_id, limit=600):
-    """
-    按评论序号返回逐条情感值，用于折线散点图。
-
-    情感值映射:
-        positive → +sentiment_score * 0.5  (0 ~ +0.5)
-        negative → -sentiment_score * 0.5  (−0.5 ~ 0)
-        neutral  → 0.0
-
-    Returns:
-        list[dict]: [{index, value, label}, ...]  共最多 limit 条
-    """
-    conn = get_db()
-    cur = conn.cursor()
-
-    rows = cur.execute(
-        "SELECT sentiment_label, sentiment_score "
-        "FROM comments "
-        "WHERE anime_id = ? AND sentiment_label IS NOT NULL "
-        "ORDER BY id "
-        "LIMIT ?",
-        (anime_id, limit)
-    ).fetchall()
-
+    with orm_session() as session:
+        rows = session.execute(
+            select(Comment.sentiment_label, Comment.sentiment_score)
+            .where(Comment.anime_id == anime_id, Comment.sentiment_label.is_not(None))
+            .order_by(Comment.id)
+            .limit(limit)
+        ).all()
     result = []
-    for i, r in enumerate(rows):
-        label = r["sentiment_label"]
-        score = r["sentiment_score"] or 0.5
+    for index, (label, raw_score) in enumerate(rows):
+        score = raw_score or 0.5
         if label == "positive":
             value = round(score * 0.5, 4)
         elif label == "negative":
             value = round(-score * 0.5, 4)
         else:
-            # 中性：置信度越高越靠近 0，置信度低时在 ±0.15 范围内小幅波动
-            # (score - 0.5) * 0.3 将 [0,1] 映射到 [-0.15, +0.15]
             value = round((score - 0.5) * 0.3, 4)
-        result.append({"index": i, "value": value, "label": label})
-
-    conn.close()
+        result.append({"index": index, "value": value, "label": label})
     return result
 
 
 def get_sentiment_trend(anime_id):
-    """
-    按天聚合返回情感趋势数据（折线图数据）
-
-    Returns:
-        list[dict]: [{date, positive, negative, neutral}, ...]
-    """
-    conn = get_db()
-    cur = conn.cursor()
-
-    rows = cur.execute(
-        "SELECT DATE(publish_time) as date, sentiment_label, COUNT(*) as cnt "
-        "FROM comments "
-        "WHERE anime_id = ? AND publish_time IS NOT NULL AND sentiment_label IS NOT NULL "
-        "GROUP BY DATE(publish_time), sentiment_label "
-        "ORDER BY date",
-        (anime_id,)
-    ).fetchall()
-
-    # 按日期聚合
+    day = func.date(Comment.publish_time).label("date")
+    with orm_session() as session:
+        rows = session.execute(
+            select(day, Comment.sentiment_label, func.count().label("cnt"))
+            .where(
+                Comment.anime_id == anime_id,
+                Comment.publish_time.is_not(None),
+                Comment.sentiment_label.is_not(None),
+            )
+            .group_by(day, Comment.sentiment_label)
+            .order_by(day)
+        ).all()
     trend_map = {}
-    for r in rows:
-        date = r["date"]
-        if not date:
+    for row_day, label, count in rows:
+        row_day = _date_value(row_day)
+        if not row_day:
             continue
-        if date not in trend_map:
-            trend_map[date] = {"date": date, "positive": 0, "negative": 0, "neutral": 0}
-        label = r["sentiment_label"]
+        trend_map.setdefault(
+            row_day,
+            {"date": row_day, "positive": 0, "negative": 0, "neutral": 0},
+        )
         if label in ("positive", "negative", "neutral"):
-            trend_map[date][label] = r["cnt"]
+            trend_map[row_day][label] = count
+    return sorted(trend_map.values(), key=lambda item: item["date"])
 
-    conn.close()
-    return sorted(trend_map.values(), key=lambda x: x["date"])
-
-
-# ===================== 主题 =====================
 
 def get_topics(anime_id):
-    """
-    获取主题和关键词
-
-    Returns:
-        list[dict]: [{topic_id, keywords: [{word, weight}, ...], weight}, ...]
-    """
-    conn = get_db()
-    cur = conn.cursor()
-
-    rows = cur.execute(
-        "SELECT topic_id, keywords, weight FROM topics "
-        "WHERE anime_id = ? ORDER BY topic_id",
-        (anime_id,)
-    ).fetchall()
-
-    result = []
-    for r in rows:
-        keywords = json.loads(r["keywords"])
-        result.append({
-            "topic_id": r["topic_id"],
-            "keywords": keywords,
-            "weight": r["weight"]
-        })
-
-    conn.close()
-    return result
+    with orm_session() as session:
+        rows = session.execute(
+            select(Topic.topic_id, Topic.keywords, Topic.weight)
+            .where(Topic.anime_id == anime_id)
+            .order_by(Topic.topic_id)
+        ).all()
+    return [
+        {
+            "topic_id": topic_id,
+            "keywords": _json_value(keywords, []),
+            "weight": weight,
+        }
+        for topic_id, keywords, weight in rows
+    ]
 
 
-# ===================== 词云数据 =====================
-
-def get_wordcloud_data(anime_id, top_n=100):
-    """
-    获取词频数据（词云用）
-
-    Returns:
-        list[dict]: [{word, count}, ...]
-    """
-    conn = get_db()
-    cur = conn.cursor()
-
-    rows = cur.execute(
-        "SELECT content FROM comments WHERE anime_id = ?",
-        (anime_id,)
-    ).fetchall()
-
-    conn.close()
-
-    if not rows:
-        return []
-
+def _wordcloud_from_contents(contents, top_n=100):
     stopwords = _load_stopwords()
     counter = Counter()
-
-    for r in rows:
-        text = r["content"]
-        if not text:
+    for content in contents:
+        if not content:
             continue
-        words = jieba.lcut(str(text))
-        for w in words:
-            w = w.strip()
-            if w and len(w) > 1 and w not in stopwords and not w.isdigit():
-                counter[w] += 1
-
-    return [{"word": w, "count": c} for w, c in counter.most_common(top_n)]
+        for word in jieba.lcut(str(content)):
+            word = word.strip()
+            if word and len(word) > 1 and word not in stopwords and not word.isdigit():
+                counter[word] += 1
+    return [{"word": word, "count": count} for word, count in counter.most_common(top_n)]
 
 
-# ===================== 三维情感分析（推荐模块用）=====================
+def get_wordcloud_data(anime_id, top_n=100):
+    with orm_session() as session:
+        contents = session.scalars(
+            select(Comment.content).where(Comment.anime_id == anime_id)
+        ).all()
+    return _wordcloud_from_contents(contents, top_n)
+
 
 def get_aspect_sentiment(anime_id):
-    """
-    对评论按「作画」「剧情」「声优」三个维度进行情感统计。
-    通过关键词过滤找出相关评论，再统计情感分布。
-
-    Returns:
-        dict: {
-            "作画": {"positive": int, "neutral": int, "negative": int, "total": int},
-            "剧情": {"positive": int, "neutral": int, "negative": int, "total": int},
-            "声优": {"positive": int, "neutral": int, "negative": int, "total": int}
-        }
-    """
-    ASPECTS = {
+    aspects = {
         "作画": ["作画", "画面", "画质", "画风", "美术", "特效", "CG"],
         "剧情": ["剧情", "故事", "情节", "剧本", "结局", "设定", "逻辑", "伏笔"],
         "声优": ["声优", "配音", "CV", "声线", "日配", "中配"],
     }
-
-    conn = get_db()
-    cur = conn.cursor()
-
     result = {}
-    for aspect, keywords in ASPECTS.items():
-        like_clauses = " OR ".join(["content LIKE ?" for _ in keywords])
-        like_params = [f"%{kw}%" for kw in keywords]
-
-        rows = cur.execute(
-            f"SELECT sentiment_label, COUNT(*) as cnt "
-            f"FROM comments "
-            f"WHERE anime_id = ? AND sentiment_label IS NOT NULL "
-            f"AND ({like_clauses}) "
-            f"GROUP BY sentiment_label",
-            [anime_id] + like_params
-        ).fetchall()
-
-        stats = {"positive": 0, "neutral": 0, "negative": 0}
-        for r in rows:
-            label = r["sentiment_label"]
-            if label in stats:
-                stats[label] = r["cnt"]
-        stats["total"] = sum(stats.values())
-        result[aspect] = stats
-
-    conn.close()
+    with orm_session() as session:
+        for aspect, keywords in aspects.items():
+            rows = session.execute(
+                select(Comment.sentiment_label, func.count().label("cnt"))
+                .where(
+                    Comment.anime_id == anime_id,
+                    Comment.sentiment_label.is_not(None),
+                    or_(*(Comment.content.like(f"%{keyword}%") for keyword in keywords)),
+                )
+                .group_by(Comment.sentiment_label)
+            ).all()
+            stats = {"positive": 0, "neutral": 0, "negative": 0}
+            for label, count in rows:
+                if label in stats:
+                    stats[label] = count
+            stats["total"] = sum(stats.values())
+            result[aspect] = stats
     return result

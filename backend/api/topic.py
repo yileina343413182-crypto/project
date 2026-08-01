@@ -7,23 +7,28 @@
     GET /api/wordcloud/<anime_id> → 词云数据
 """
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
+from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.concurrency import run_in_threadpool
 
 from backend.api.common import ok
-from backend.database import get_topics, get_wordcloud_data
+from backend.database import _wordcloud_from_contents
+from backend.db.async_repository import get_topics, get_wordcloud_contents
+from backend.db.session import get_async_session
 
 router = APIRouter()
 
 
 @router.get("/api/topics/{anime_id}")
-def topics(anime_id: int):
+async def topics(anime_id: int, session: AsyncSession = Depends(get_async_session)):
     """获取LDA主题列表"""
-    data = get_topics(anime_id)
+    data = await get_topics(session, anime_id)
     return ok(data)
 
 
 @router.get("/api/wordcloud/{anime_id}")
-def wordcloud(anime_id: int):
+async def wordcloud(anime_id: int, session: AsyncSession = Depends(get_async_session)):
     """获取词云数据"""
-    data = get_wordcloud_data(anime_id)
+    contents = await get_wordcloud_contents(session, anime_id)
+    data = await run_in_threadpool(_wordcloud_from_contents, contents, 100)
     return ok(data)

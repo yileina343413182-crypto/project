@@ -29,13 +29,14 @@
 import os
 import re
 import sys
-import sqlite3
 import argparse
 import logging
 from datetime import datetime
 
 import pandas as pd
 import jieba
+from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 
 # 日志配置
 logging.basicConfig(
@@ -49,6 +50,11 @@ logger = logging.getLogger(__name__)
 
 # 项目根目录
 PROJECT_ROOT = os.path.dirname(os.path.dirname(__file__))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+from backend.db.models import Anime, Base, Comment, Topic
+from backend.db.session import get_sessionmaker, get_sync_engine
 # 数据目录
 RAW_DIR = os.path.join(PROJECT_ROOT, "data", "raw")
 PROCESSED_DIR = os.path.join(PROJECT_ROOT, "data", "processed")
@@ -230,122 +236,36 @@ def clean_dataframe(df, stopwords=None, platform="bilibili", min_length=5):
 
 
 def init_database(db_path=None):
-    """
-    初始化SQLite数据库，创建所需的表（如果不存在）。
+    """创建爬虫所需业务表，并返回一个同步 ORM Session。"""
+    if db_path:
+        os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
 
-    Args:
-        db_path: 数据库文件路径，默认使用 data/anime_sentiment.db
-
-    Returns:
-        sqlite3.Connection: 数据库连接对象
-    """
-    if db_path is None:
-        db_path = DB_PATH
-
-    # 确保数据库所在目录存在
-    os.makedirs(os.path.dirname(db_path), exist_ok=True)
-
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-
-    # 创建动漫信息表
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS anime (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            platform TEXT NOT NULL,
-            url TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-
-    # 创建评论表
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS comments (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            anime_id INTEGER NOT NULL,
-            content TEXT NOT NULL,
-            clean_content TEXT,
-            publish_time TIMESTAMP,
-            likes INTEGER DEFAULT 0,
-            platform TEXT NOT NULL,
-            sentiment_label TEXT,
-            sentiment_score REAL,
-            model_used TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (anime_id) REFERENCES anime(id)
-        )
-    """)
-
-    # 创建主题表
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS topics (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            anime_id INTEGER NOT NULL,
-            topic_id INTEGER NOT NULL,
-            keywords TEXT NOT NULL,
-            weight REAL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (anime_id) REFERENCES anime(id)
-        )
-    """)
-
-    conn.commit()
-    logger.info("数据库初始化完成: %s", db_path)
-    return conn
+    engine = get_sync_engine(db_path=db_path)
+    Base.metadata.create_all(engine, tables=[Anime.__table__, Comment.__table__, Topic.__table__])
+    target = db_path or engine.url.render_as_string(hide_password=True)
+    logger.info("数据库初始化完成: %s", target)
+    return get_sessionmaker(db_path=db_path)()
 
 
 def get_or_create_anime(conn, anime_name, platform, url=None):
-    """
-    获取或创建动漫记录，返回anime_id。
-
-    Args:
-        conn: 数据库连接
-        anime_name: 动漫名称
-        platform: 来源平台
-        url: 相关URL
-
-    Returns:
-        int: 动漫记录的ID
-    """
-    cursor = conn.cursor()
-
-    # 查找是否已存在
-    cursor.execute(
-        "SELECT id FROM anime WHERE name = ? AND platform = ?",
-        (anime_name, platform)
+    """获取已有动漫 ID，或在当前事务中创建记录。"""
+    anime_id = conn.scalar(
+        select(Anime.id).where(Anime.name == anime_name, Anime.platform == platform)
     )
-    row = cursor.fetchone()
+    if anime_id is not None:
+        return anime_id
 
-    if row:
-        return row[0]
-
-    # 不存在则新建
-    cursor.execute(
-        "INSERT INTO anime (name, platform, url) VALUES (?, ?, ?)",
-        (anime_name, platform, url)
-    )
-    conn.commit()
-    anime_id = cursor.lastrowid
+    anime = Anime(name=anime_name, platform=platform, url=url)
+    conn.add(anime)
+    conn.flush()
+    anime_id = anime.id
     logger.info("创建动漫记录: id=%d, name=%s, platform=%s", anime_id, anime_name, platform)
     return anime_id
 
 
 def save_to_database(conn, df, anime_id, platform):
-    """
-    将清洗后的评论数据写入SQLite数据库。
-
-    Args:
-        conn: 数据库连接
-        df: 清洗后的DataFrame
-        anime_id: 动漫记录ID
-        platform: 来源平台
-
-    Returns:
-        int: 写入的记录数
-    """
-    cursor = conn.cursor()
-    count = 0
+    """将清洗后的评论批量写入当前配置的业务数据库。"""
+    records = []
 
     # 根据平台确定字段映射
     for _, row in df.iterrows():
@@ -367,18 +287,36 @@ def save_to_database(conn, df, anime_id, platform):
             publish_time = None
             likes = 0
 
-        try:
-            cursor.execute(
-                """INSERT INTO comments (anime_id, content, clean_content, publish_time, likes, platform)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (anime_id, content, clean_content, publish_time, likes, platform)
-            )
-            count += 1
-        except sqlite3.Error as e:
-            logger.debug("插入评论失败: %s", e)
-            continue
+        if pd.isna(publish_time):
+            publish_time = None
+        records.append({
+            "anime_id": anime_id,
+            "content": content,
+            "clean_content": clean_content,
+            "publish_time": publish_time,
+            "likes": likes,
+            "platform": platform,
+        })
 
-    conn.commit()
+    if not records:
+        return 0
+
+    try:
+        conn.execute(Comment.__table__.insert(), records)
+        conn.commit()
+        count = len(records)
+    except SQLAlchemyError as exc:
+        conn.rollback()
+        logger.warning("批量写入失败，改为逐条兼容写入: %s", exc)
+        count = 0
+        for record in records:
+            try:
+                with conn.begin_nested():
+                    conn.execute(Comment.__table__.insert(), record)
+                count += 1
+            except SQLAlchemyError as row_exc:
+                logger.debug("插入评论失败: %s", row_exc)
+        conn.commit()
     logger.info("已写入数据库 %d 条评论记录", count)
     return count
 
@@ -469,7 +407,7 @@ def main():
     parser.add_argument("--stopwords", type=str, default=None,
                         help="停用词文件路径（默认使用 data/stopwords.txt）")
     parser.add_argument("--db_path", type=str, default=None,
-                        help="SQLite数据库路径（默认 data/anime_sentiment.db）")
+                        help="SQLite 兼容覆盖路径（默认使用项目数据库配置）")
     parser.add_argument("--no_db", action="store_true",
                         help="不写入数据库，仅保存CSV")
     args = parser.parse_args()

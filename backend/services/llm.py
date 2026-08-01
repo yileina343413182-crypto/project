@@ -5,8 +5,11 @@ import json
 import logging
 import requests
 from difflib import SequenceMatcher
+from sqlalchemy import select
 
-from backend.config import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL, DB_PATH, LLM_PROVIDER
+from backend.config import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL, LLM_PROVIDER
+from backend.database import orm_session
+from backend.db.models import Comment
 from backend.prompts.registry import get_prompt
 
 logger = logging.getLogger(__name__)
@@ -235,17 +238,16 @@ def _llm_description_from_comments(anime_name: str, comments: list) -> str:
 
 
 def _fetch_comments_from_db(anime_id: int, limit: int = 20) -> list:
-    """从 SQLite 数据库读取指定动漫的前 N 条有效评论文本。"""
-    import sqlite3
+    """通过共享同步 ORM 读取指定动漫的前 N 条有效评论文本。"""
     try:
-        conn = sqlite3.connect(DB_PATH)
-        rows = conn.execute(
-            "SELECT content FROM comments WHERE anime_id = ? AND content != '' "
-            "ORDER BY likes DESC, id ASC LIMIT ?",
-            (anime_id, limit),
-        ).fetchall()
-        conn.close()
-        return [r[0] for r in rows if r[0] and len(r[0]) > 5]
+        with orm_session() as session:
+            rows = session.scalars(
+                select(Comment.content)
+                .where(Comment.anime_id == anime_id, Comment.content != "")
+                .order_by(Comment.likes.desc(), Comment.id)
+                .limit(limit)
+            ).all()
+        return [content for content in rows if content and len(content) > 5]
     except Exception as e:
         logger.warning("读取评论失败: %s", e)
         return []

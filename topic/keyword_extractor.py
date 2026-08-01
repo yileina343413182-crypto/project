@@ -15,13 +15,13 @@
 
 import os
 import sys
-import sqlite3
 import argparse
 import logging
 from collections import Counter
 
 import jieba
 import pandas as pd
+from sqlalchemy import select
 from sklearn.feature_extraction.text import TfidfVectorizer
 
 logging.basicConfig(
@@ -33,7 +33,12 @@ logger = logging.getLogger(__name__)
 
 # 项目根目录
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DB_PATH = os.path.join(PROJECT_ROOT, "data", "anime_sentiment.db")
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+from backend.db.models import Anime, Comment
+from backend.db.session import session_scope
+
 STOPWORDS_PATH = os.path.join(PROJECT_ROOT, "data", "stopwords.txt")
 
 
@@ -55,19 +60,13 @@ def load_stopwords(filepath=None):
 
 def get_comments_from_db(anime_id, db_path=None):
     """从数据库读取指定动漫的评论"""
-    if db_path is None:
-        db_path = DB_PATH
-
-    conn = sqlite3.connect(db_path)
-    cur = conn.cursor()
-
-    cur.execute("SELECT name FROM anime WHERE id = ?", (anime_id,))
-    row = cur.fetchone()
-    anime_name = row[0] if row else "未知动漫"
-
-    cur.execute("SELECT content FROM comments WHERE anime_id = ?", (anime_id,))
-    comments = [r[0] for r in cur.fetchall() if r[0]]
-    conn.close()
+    with session_scope(db_path=db_path) as session:
+        anime_name = session.scalar(select(Anime.name).where(Anime.id == anime_id)) or "未知动漫"
+        comments = list(session.scalars(
+            select(Comment.content)
+            .where(Comment.anime_id == anime_id, Comment.content.is_not(None))
+            .order_by(Comment.id)
+        ))
 
     logger.info("动漫: [%d] %s, 评论数: %d", anime_id, anime_name, len(comments))
     return comments, anime_name

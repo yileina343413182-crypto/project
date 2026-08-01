@@ -16,13 +16,12 @@ LDA 主题建模模块
 
 import os
 import sys
-import sqlite3
 import argparse
 import logging
-import json
 
 import jieba
 import pandas as pd
+from sqlalchemy import delete, select
 from gensim import corpora, models
 from gensim.models import CoherenceModel
 
@@ -35,7 +34,12 @@ logger = logging.getLogger(__name__)
 
 # 项目根目录
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DB_PATH = os.path.join(PROJECT_ROOT, "data", "anime_sentiment.db")
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+from backend.db.models import Anime, Comment, Topic
+from backend.db.session import session_scope
+
 STOPWORDS_PATH = os.path.join(PROJECT_ROOT, "data", "stopwords.txt")
 
 
@@ -66,22 +70,14 @@ def get_comments_from_db(anime_id, db_path=None):
     Returns:
         list[str]: 评论内容列表
     """
-    if db_path is None:
-        db_path = DB_PATH
-
-    conn = sqlite3.connect(db_path)
-    cur = conn.cursor()
-
-    # 获取动漫名称
-    cur.execute("SELECT name FROM anime WHERE id = ?", (anime_id,))
-    row = cur.fetchone()
-    anime_name = row[0] if row else "未知动漫"
+    with session_scope(db_path=db_path) as session:
+        anime_name = session.scalar(select(Anime.name).where(Anime.id == anime_id)) or "未知动漫"
+        comments = list(session.scalars(
+            select(Comment.content)
+            .where(Comment.anime_id == anime_id, Comment.content.is_not(None))
+            .order_by(Comment.id)
+        ))
     logger.info("动漫: [%d] %s", anime_id, anime_name)
-
-    # 读取评论（优先用原始content，因为clean_content可能有问题）
-    cur.execute("SELECT content FROM comments WHERE anime_id = ?", (anime_id,))
-    comments = [r[0] for r in cur.fetchall() if r[0]]
-    conn.close()
 
     logger.info("读取到 %d 条评论", len(comments))
     return comments, anime_name
@@ -250,27 +246,20 @@ def save_topics_to_db(anime_id, topics, db_path=None):
         topics: get_topics()返回的主题列表
         db_path: 数据库路径
     """
-    if db_path is None:
-        db_path = DB_PATH
+    records = []
+    for topic in topics:
+        total_weight = sum(keyword["weight"] for keyword in topic["keywords"])
+        records.append({
+            "anime_id": anime_id,
+            "topic_id": topic["topic_id"],
+            "keywords": topic["keywords"],
+            "weight": round(total_weight, 6),
+        })
 
-    conn = sqlite3.connect(db_path)
-    cur = conn.cursor()
-
-    # 删除该动漫的旧主题数据
-    cur.execute("DELETE FROM topics WHERE anime_id = ?", (anime_id,))
-
-    # 插入新主题
-    for t in topics:
-        keywords_json = json.dumps(t["keywords"], ensure_ascii=False)
-        # weight 存储该主题的总权重（所有关键词权重之和）
-        total_weight = sum(k["weight"] for k in t["keywords"])
-        cur.execute(
-            "INSERT INTO topics (anime_id, topic_id, keywords, weight) VALUES (?, ?, ?, ?)",
-            (anime_id, t["topic_id"], keywords_json, round(total_weight, 6))
-        )
-
-    conn.commit()
-    conn.close()
+    with session_scope(db_path=db_path) as session:
+        session.execute(delete(Topic).where(Topic.anime_id == anime_id))
+        if records:
+            session.execute(Topic.__table__.insert(), records)
     logger.info("已将 %d 个主题写入数据库 (anime_id=%d)", len(topics), anime_id)
 
 

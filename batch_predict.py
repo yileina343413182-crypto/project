@@ -22,10 +22,11 @@
 
 import os
 import sys
-import sqlite3
 import argparse
 import logging
 import time
+
+from sqlalchemy import bindparam, select
 
 # 确保项目根目录在 sys.path 中
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -39,9 +40,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-DB_PATH = os.path.join(PROJECT_ROOT, "data", "anime_sentiment.db")
 TEXTCNN_MODEL_DIR = os.path.join(PROJECT_ROOT, "models", "saved", "textcnn")
 BERT_MODEL_DIR = os.path.join(PROJECT_ROOT, "models", "saved", "bert")
+
+from backend.db.models import Comment
+from backend.db.session import session_scope
 
 
 def load_model(model_name):
@@ -59,34 +62,26 @@ def load_model(model_name):
     return classifier
 
 
-def fetch_comments(db_path, anime_id=None, overwrite=False):
+def fetch_comments(db_path=None, anime_id=None, overwrite=False):
     """
     从数据库读取待预测的评论
 
     Returns:
         list[tuple]: [(id, content), ...]
     """
-    conn = sqlite3.connect(db_path)
-    cur = conn.cursor()
-
-    sql = "SELECT id, content FROM comments WHERE content IS NOT NULL AND content != ''"
-    params = []
-
+    statement = select(Comment.id, Comment.content).where(
+        Comment.content.is_not(None), Comment.content != ""
+    )
     if not overwrite:
-        sql += " AND sentiment_label IS NULL"
-
+        statement = statement.where(Comment.sentiment_label.is_(None))
     if anime_id is not None:
-        sql += " AND anime_id = ?"
-        params.append(anime_id)
+        statement = statement.where(Comment.anime_id == anime_id)
 
-    sql += " ORDER BY id"
-    cur.execute(sql, params)
-    rows = cur.fetchall()
-    conn.close()
-    return rows
+    with session_scope(db_path=db_path) as session:
+        return [tuple(row) for row in session.execute(statement.order_by(Comment.id)).all()]
 
 
-def update_predictions(db_path, updates):
+def update_predictions(db_path=None, updates=None):
     """
     批量回写预测结果
 
@@ -94,14 +89,28 @@ def update_predictions(db_path, updates):
         db_path: 数据库路径
         updates: [(sentiment_label, sentiment_score, model_used, comment_id), ...]
     """
-    conn = sqlite3.connect(db_path)
-    cur = conn.cursor()
-    cur.executemany(
-        "UPDATE comments SET sentiment_label = ?, sentiment_score = ?, model_used = ? WHERE id = ?",
-        updates
+    if not updates:
+        return
+    statement = (
+        Comment.__table__.update()
+        .where(Comment.id == bindparam("b_comment_id"))
+        .values(
+            sentiment_label=bindparam("b_label"),
+            sentiment_score=bindparam("b_score"),
+            model_used=bindparam("b_model"),
+        )
     )
-    conn.commit()
-    conn.close()
+    values = [
+        {
+            "b_label": label,
+            "b_score": score,
+            "b_model": model_used,
+            "b_comment_id": comment_id,
+        }
+        for label, score, model_used, comment_id in updates
+    ]
+    with session_scope(db_path=db_path) as session:
+        session.execute(statement, values)
 
 
 def main():
@@ -115,10 +124,10 @@ def main():
     parser.add_argument("--overwrite", action="store_true",
                         help="覆盖已有的预测结果")
     parser.add_argument("--db_path", type=str, default=None,
-                        help="数据库路径 (默认 data/anime_sentiment.db)")
+                        help="SQLite 兼容覆盖路径（默认使用项目数据库配置）")
     args = parser.parse_args()
 
-    db_path = args.db_path or DB_PATH
+    db_path = args.db_path
 
     # 1. 读取待预测评论
     logger.info("读取待预测评论 (overwrite=%s, anime_id=%s)", args.overwrite, args.anime_id)

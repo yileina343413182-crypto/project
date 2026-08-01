@@ -12,9 +12,10 @@
 
 import os
 import sys
-import sqlite3
 import argparse
 import logging
+
+from sqlalchemy import case, func, select
 
 # Windows UTF-8 输出
 if sys.platform == "win32":
@@ -35,9 +36,11 @@ PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-DB_PATH    = os.path.join(PROJECT_ROOT, "data", "anime_sentiment.db")
 RAW_DIR    = os.path.join(PROJECT_ROOT, "data", "raw")
 PROC_DIR   = os.path.join(PROJECT_ROOT, "data", "processed")
+
+from backend.db.models import Anime, Comment
+from backend.db.session import get_sessionmaker, session_scope
 
 # ─── 目标动漫常量（修改这里即可切换目标动漫）────────────────────────────────
 
@@ -73,19 +76,18 @@ def init_db():
     """初始化数据库表，并预插入 anime_id=0 的魔女之旅记录。"""
     step("初始化数据库")
     from crawler.cleaner import init_database
-    conn = init_database(DB_PATH)
+    conn = init_database()
 
-    cur = conn.cursor()
-    # 检查 id=0 的记录是否已存在
-    row = cur.execute("SELECT id, name FROM anime WHERE id = ?", (ANIME_ID,)).fetchone()
-    if row:
-        warn(f"anime 表中已有 id={ANIME_ID} 的记录: {row[1]}，跳过插入")
+    anime = conn.get(Anime, ANIME_ID)
+    if anime:
+        warn(f"anime 表中已有 id={ANIME_ID} 的记录: {anime.name}，跳过插入")
     else:
-        cur.execute(
-            "INSERT INTO anime (id, name, platform, url) VALUES (?, ?, ?, ?)",
-            (ANIME_ID, ANIME_NAME, "bilibili+bangumi",
-             "https://bgm.tv/subject/292970"),
-        )
+        conn.add(Anime(
+            id=ANIME_ID,
+            name=ANIME_NAME,
+            platform="bilibili+bangumi",
+            url="https://bgm.tv/subject/292970",
+        ))
         conn.commit()
         ok(f"已插入 anime 记录: id={ANIME_ID}, name={ANIME_NAME}")
 
@@ -211,8 +213,7 @@ def clean_and_import_all(dry_run=False, bili_title=None):
         )
 
         stopwords = load_stopwords()
-        conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row
+        conn = get_sessionmaker()()
 
         # 构建搜索名称集合：常量名 + B站实际命中 title
         search_names = {ANIME_NAME, BILI_KEYWORD}
@@ -253,7 +254,6 @@ def clean_and_import_all(dry_run=False, bili_title=None):
             n = save_to_database(conn, df_clean, ANIME_ID, platform)
             total_imported += n
 
-        conn.commit()
         conn.close()
         ok(f"入库完成，共写入 {total_imported} 条评论（anime_id={ANIME_ID}）")
 
@@ -267,27 +267,25 @@ def clean_and_import_all(dry_run=False, bili_title=None):
 def show_summary():
     """查询并打印 anime_id=0 的数据库统计。"""
     step("数据统计汇总")
-    if not os.path.exists(DB_PATH):
-        warn("数据库文件不存在")
-        return
+    with session_scope() as conn:
+        anime = conn.get(Anime, ANIME_ID)
+        if anime:
+            ok(f"anime 记录: id={anime.id}, name={anime.name}, platform={anime.platform}")
+        else:
+            warn(f"anime 表中不存在 id={ANIME_ID} 的记录")
 
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-
-    # 动漫基本信息
-    row = cur.execute("SELECT * FROM anime WHERE id = ?", (ANIME_ID,)).fetchone()
-    if row:
-        ok(f"anime 记录: id={row[0]}, name={row[1]}, platform={row[2]}")
-    else:
-        warn(f"anime 表中不存在 id={ANIME_ID} 的记录")
-
-    # 按平台统计评论
-    rows = cur.execute(
-        "SELECT platform, COUNT(*) AS cnt, "
-        "SUM(CASE WHEN sentiment_label IS NOT NULL THEN 1 ELSE 0 END) AS labeled "
-        "FROM comments WHERE anime_id = ? GROUP BY platform",
-        (ANIME_ID,),
-    ).fetchall()
+        rows = conn.execute(
+            select(
+                Comment.platform,
+                func.count(Comment.id),
+                func.coalesce(
+                    func.sum(case((Comment.sentiment_label.is_not(None), 1), else_=0)), 0
+                ),
+            )
+            .where(Comment.anime_id == ANIME_ID)
+            .group_by(Comment.platform)
+            .order_by(Comment.platform)
+        ).all()
 
     if rows:
         print(f"\n  {'平台':<12}{'评论总数':<12}{'已标注':<12}")
@@ -297,7 +295,6 @@ def show_summary():
     else:
         warn(f"comments 表中暂无 anime_id={ANIME_ID} 的数据")
 
-    conn.close()
 
 
 # ─── 主入口 ──────────────────────────────────────────────────────────────────

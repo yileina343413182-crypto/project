@@ -8,18 +8,21 @@ DELETE /api/history/chat/<id>   — 删除指定历史条目
 """
 
 from fastapi import APIRouter, Body, Depends, Query
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.api.common import error_response, ok
-from backend.database import save_chat_message, get_chat_history, delete_chat_message
+from backend.db.async_repository import save_chat_exchange, get_chat_history, delete_chat_message
+from backend.db.session import get_async_session
 from backend.security import get_current_user_id
 
 router = APIRouter(prefix="/api/history")
 
 
 @router.post("/chat")
-def save_history(
+async def save_history(
     body: dict | None = Body(default=None),
     user_id: int = Depends(get_current_user_id),
+    session: AsyncSession = Depends(get_async_session),
 ):
     """
     保存一次完整的问答记录（用户问 + AI答，合并为一条记录）
@@ -34,18 +37,24 @@ def save_history(
     if not user_content or not ai_content:
         return error_response("user_content 和 ai_content 不能为空")
 
-    # 将用户问和AI答各保存一条（同一user_id）
-    save_chat_message(user_id, "user", user_content)
-    msg_id = save_chat_message(user_id, "ai", ai_content, anime_card)
+    # 一次事务保存问答两条消息，避免只写入一半。
+    msg_id = await save_chat_exchange(
+        session,
+        user_id,
+        user_content,
+        ai_content,
+        anime_card,
+    )
 
     return ok({"msg_id": msg_id}, msg="保存成功")
 
 
 @router.get("/chat")
-def list_history(
+async def list_history(
     page: str = Query(default="1"),
     page_size: str = Query(default="20"),
     user_id: int = Depends(get_current_user_id),
+    session: AsyncSession = Depends(get_async_session),
 ):
     """获取当前用户的聊天历史（分页）"""
     try:
@@ -54,14 +63,18 @@ def list_history(
     except (ValueError, TypeError):
         page, page_size = 1, 20
 
-    result = get_chat_history(user_id, page=page, page_size=page_size)
+    result = await get_chat_history(session, user_id, page=page, page_size=page_size)
     return ok(result)
 
 
 @router.delete("/chat/{msg_id}")
-def delete_history(msg_id: int, user_id: int = Depends(get_current_user_id)):
+async def delete_history(
+    msg_id: int,
+    user_id: int = Depends(get_current_user_id),
+    session: AsyncSession = Depends(get_async_session),
+):
     """删除指定历史条目（只能删自己的）"""
-    affected = delete_chat_message(msg_id, user_id)
+    affected = await delete_chat_message(session, msg_id, user_id)
     if affected == 0:
         return error_response("记录不存在或无权删除", 404)
     return ok(msg="删除成功")

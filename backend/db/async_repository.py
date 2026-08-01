@@ -1,0 +1,292 @@
+"""AsyncSession CRUD used only by the FastAPI request layer."""
+
+from __future__ import annotations
+
+import json
+from datetime import date, datetime
+
+from sqlalchemy import delete, func, or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from backend.db.models import Anime, ChatHistory, Comment, Topic, User
+
+
+def _date_value(value):
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d %H:%M:%S")
+    if isinstance(value, date):
+        return value.isoformat()
+    return value
+
+
+def _json_value(value, default=None):
+    if value is None:
+        return default
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except (TypeError, ValueError):
+            return default
+    return value
+
+
+async def create_user(session: AsyncSession, username: str, password_hash: str) -> int:
+    user = User(username=username, password_hash=password_hash)
+    session.add(user)
+    await session.flush()
+    return user.id
+
+
+async def get_user_by_username(session: AsyncSession, username: str) -> dict | None:
+    user = await session.scalar(select(User).where(User.username == username))
+    if user is None:
+        return None
+    return {
+        "id": user.id,
+        "username": user.username,
+        "password_hash": user.password_hash,
+        "created_at": _date_value(user.created_at),
+    }
+
+
+async def get_user_by_id(session: AsyncSession, user_id: int) -> dict | None:
+    user = await session.get(User, user_id)
+    if user is None:
+        return None
+    return {"id": user.id, "username": user.username, "created_at": _date_value(user.created_at)}
+
+
+async def save_chat_exchange(
+    session: AsyncSession,
+    user_id: int,
+    user_content: str,
+    ai_content: str,
+    anime_card=None,
+) -> int:
+    session.add(ChatHistory(user_id=user_id, role="user", content=user_content))
+    answer = ChatHistory(
+        user_id=user_id,
+        role="ai",
+        content=ai_content,
+        anime_card=anime_card,
+    )
+    session.add(answer)
+    await session.flush()
+    return answer.id
+
+
+async def get_chat_history(
+    session: AsyncSession,
+    user_id: int,
+    page: int = 1,
+    page_size: int = 20,
+) -> dict:
+    offset = (page - 1) * page_size
+    total = await session.scalar(
+        select(func.count()).select_from(ChatHistory).where(ChatHistory.user_id == user_id)
+    ) or 0
+    rows = (
+        await session.scalars(
+            select(ChatHistory)
+            .where(ChatHistory.user_id == user_id)
+            .order_by(ChatHistory.created_at.desc(), ChatHistory.id.desc())
+            .limit(page_size)
+            .offset(offset)
+        )
+    ).all()
+    return {
+        "items": [
+            {
+                "id": row.id,
+                "role": row.role,
+                "content": row.content,
+                "anime_card": _json_value(row.anime_card),
+                "created_at": _date_value(row.created_at),
+            }
+            for row in rows
+        ],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
+
+
+async def delete_chat_message(session: AsyncSession, msg_id: int, user_id: int) -> int:
+    result = await session.execute(
+        delete(ChatHistory).where(ChatHistory.id == msg_id, ChatHistory.user_id == user_id)
+    )
+    return result.rowcount
+
+
+async def get_all_anime(session: AsyncSession) -> list[dict]:
+    rows = (
+        await session.execute(
+            select(
+                Anime.id,
+                Anime.name,
+                Anime.platform,
+                func.count(Comment.id).label("comment_count"),
+            )
+            .outerjoin(Comment, Anime.id == Comment.anime_id)
+            .group_by(Anime.id, Anime.name, Anime.platform)
+            .order_by(Anime.id)
+        )
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+async def get_comments(
+    session: AsyncSession,
+    anime_id: int,
+    sentiment=None,
+    page: int = 1,
+    page_size: int = 20,
+) -> dict:
+    filters = [Comment.anime_id == anime_id]
+    if sentiment:
+        filters.append(Comment.sentiment_label == sentiment)
+    offset = (page - 1) * page_size
+    total = await session.scalar(
+        select(func.count()).select_from(Comment).where(*filters)
+    ) or 0
+    rows = (
+        await session.execute(
+            select(
+                Comment.id,
+                Comment.content,
+                Comment.sentiment_label,
+                Comment.sentiment_score,
+                Comment.likes,
+                Comment.publish_time,
+                Comment.platform,
+            )
+            .where(*filters)
+            .order_by(Comment.id)
+            .limit(page_size)
+            .offset(offset)
+        )
+    ).mappings().all()
+    items = []
+    for index, row in enumerate(rows):
+        item = dict(row)
+        item["seq"] = offset + index + 1
+        item["publish_time"] = _date_value(item["publish_time"])
+        items.append(item)
+    return {"total": total, "page": page, "page_size": page_size, "items": items}
+
+
+async def get_sentiment_stats(session: AsyncSession, anime_id: int) -> dict:
+    rows = (
+        await session.execute(
+            select(Comment.sentiment_label, func.count().label("cnt"))
+            .where(Comment.anime_id == anime_id, Comment.sentiment_label.is_not(None))
+            .group_by(Comment.sentiment_label)
+        )
+    ).all()
+    stats = {"positive": 0, "negative": 0, "neutral": 0}
+    for label, count in rows:
+        if label in stats:
+            stats[label] = count
+    stats["total"] = sum(stats.values())
+    return stats
+
+
+async def get_sentiment_scatter(session: AsyncSession, anime_id: int, limit: int = 600) -> list[dict]:
+    rows = (
+        await session.execute(
+            select(Comment.sentiment_label, Comment.sentiment_score)
+            .where(Comment.anime_id == anime_id, Comment.sentiment_label.is_not(None))
+            .order_by(Comment.id)
+            .limit(limit)
+        )
+    ).all()
+    result = []
+    for index, (label, raw_score) in enumerate(rows):
+        score = raw_score or 0.5
+        value = (
+            round(score * 0.5, 4)
+            if label == "positive"
+            else round(-score * 0.5, 4)
+            if label == "negative"
+            else round((score - 0.5) * 0.3, 4)
+        )
+        result.append({"index": index, "value": value, "label": label})
+    return result
+
+
+async def get_sentiment_trend(session: AsyncSession, anime_id: int) -> list[dict]:
+    day = func.date(Comment.publish_time).label("date")
+    rows = (
+        await session.execute(
+            select(day, Comment.sentiment_label, func.count().label("cnt"))
+            .where(
+                Comment.anime_id == anime_id,
+                Comment.publish_time.is_not(None),
+                Comment.sentiment_label.is_not(None),
+            )
+            .group_by(day, Comment.sentiment_label)
+            .order_by(day)
+        )
+    ).all()
+    trend_map = {}
+    for row_day, label, count in rows:
+        row_day = _date_value(row_day)
+        if not row_day:
+            continue
+        trend_map.setdefault(
+            row_day,
+            {"date": row_day, "positive": 0, "negative": 0, "neutral": 0},
+        )
+        if label in ("positive", "negative", "neutral"):
+            trend_map[row_day][label] = count
+    return sorted(trend_map.values(), key=lambda item: item["date"])
+
+
+async def get_topics(session: AsyncSession, anime_id: int) -> list[dict]:
+    rows = (
+        await session.execute(
+            select(Topic.topic_id, Topic.keywords, Topic.weight)
+            .where(Topic.anime_id == anime_id)
+            .order_by(Topic.topic_id)
+        )
+    ).all()
+    return [
+        {"topic_id": topic_id, "keywords": _json_value(keywords, []), "weight": weight}
+        for topic_id, keywords, weight in rows
+    ]
+
+
+async def get_wordcloud_contents(session: AsyncSession, anime_id: int) -> list[str]:
+    return list(
+        (
+            await session.scalars(select(Comment.content).where(Comment.anime_id == anime_id))
+        ).all()
+    )
+
+
+async def get_aspect_sentiment(session: AsyncSession, anime_id: int) -> dict:
+    aspects = {
+        "作画": ["作画", "画面", "画质", "画风", "美术", "特效", "CG"],
+        "剧情": ["剧情", "故事", "情节", "剧本", "结局", "设定", "逻辑", "伏笔"],
+        "声优": ["声优", "配音", "CV", "声线", "日配", "中配"],
+    }
+    result = {}
+    for aspect, keywords in aspects.items():
+        rows = (
+            await session.execute(
+                select(Comment.sentiment_label, func.count().label("cnt"))
+                .where(
+                    Comment.anime_id == anime_id,
+                    Comment.sentiment_label.is_not(None),
+                    or_(*(Comment.content.like(f"%{keyword}%") for keyword in keywords)),
+                )
+                .group_by(Comment.sentiment_label)
+            )
+        ).all()
+        stats = {"positive": 0, "neutral": 0, "negative": 0}
+        for label, count in rows:
+            if label in stats:
+                stats[label] = count
+        stats["total"] = sum(stats.values())
+        result[aspect] = stats
+    return result
