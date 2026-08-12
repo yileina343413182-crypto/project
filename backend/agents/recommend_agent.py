@@ -1,5 +1,9 @@
 ﻿# -*- coding: utf-8 -*-
-"""Compatibility facade and shared helpers for Recommendation Agent 2.0."""
+"""推荐 Agent 2.0 的兼容入口与共享辅助函数。
+
+真正的节点编排位于 ``recommend_graph``；本模块保留原公开入口，并提供
+结构化校验、提示词预算控制和本地降级组装。
+"""
 
 from __future__ import annotations
 
@@ -30,14 +34,16 @@ def _evidence_models(evidence: list[dict]) -> list[RetrievalEvidence]:
     return [item if isinstance(item, RetrievalEvidence) else RetrievalEvidence(**item) for item in evidence]
 
 
-# Deterministic Recommendation Agent 2.0.
+# 只有这些字段允许从模型输出进入偏好建议，最终持久化前还会经过安全过滤。
 _PREF_FIELDS = {"likes", "dislikes", "preferred_moods", "preferred_genres", "feedback"}
 
 def _plain_step(name, status, detail, started=None):
+    """构造统一的 Agent 执行步骤，便于前端展示和问题追踪。"""
     import time
     return {"name": name, "status": status, "detail": detail, "elapsed_ms": int((time.perf_counter()-started)*1000) if started else 0}
 
 def _validate_recommendation(data, candidates, evidence_map):
+    """限制推荐数量、候选范围和证据归属，返回清洗结果及错误列表。"""
     errors, seen = [], set(); allowed = {int(x["id"]): x for x in candidates}
     recs = data.get("recommendations") or []
     if data.get("need_clarification"):
@@ -61,6 +67,7 @@ def _validate_recommendation(data, candidates, evidence_map):
     return data, errors
 
 def _structured(model, prompt, prompt_template=None):
+    """要求模型按 LLMRecommendationResponse 结构输出。"""
     actual_prompt = prompt_template or get_prompt("recommendation")
     response = model.with_structured_output(LLMRecommendationResponse).invoke([
         ("system", actual_prompt.render_system()),
@@ -75,6 +82,7 @@ def _render_bounded_prompt(
     history,
     prompt_template=None,
 ):
+    """超预算时依次丢弃多余证据、主题和最早历史，再渲染提示词。"""
     import copy
     actual_prompt = prompt_template or get_prompt("recommendation")
     items = copy.deepcopy(candidates); compact = compact_history(history)
@@ -103,6 +111,7 @@ def _render_bounded_prompt(
         "schema_chars": schema_chars, "estimated_input_tokens": int((len(prompt)+schema_chars)/1.5), "max_output_tokens": RECOMMEND_LLM_MAX_TOKENS}
 
 def _local_result(query, candidates, preferences, evidence_map, steps, trace, reason, diagnostics, budget=None):
+    """把本地推荐补齐为与正常 LLM 路径一致的响应与追踪字段。"""
     candidates = sorted(candidates, key=lambda x: (bool(evidence_map.get(int(x["id"]))), x.get("final_score", x.get("score", 0))), reverse=True)
     result = build_recommendation_fallback(query, candidates, preferences)
     all_items = [x for values in evidence_map.values() for x in values]
@@ -121,6 +130,7 @@ def run_recommendation_agent(
     *,
     task_id: int | None = None,
 ) -> dict:
+    """兼容旧调用方的公开入口，实际委托给 LangGraph 工作流。"""
     from backend.agents.recommend_graph import run_recommendation_graph
 
     return run_recommendation_graph(user_id, query, history, task_id=task_id)

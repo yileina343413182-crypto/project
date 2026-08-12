@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-聊天历史 API（JWT 保护）
+聊天历史 API（全部接口均由 JWT 保护）
 
 POST   /api/history/chat        — 保存聊天消息（问+答一次保存）
 GET    /api/history/chat        — 分页获取当前用户历史
@@ -25,7 +25,7 @@ async def save_history(
     session: AsyncSession = Depends(get_async_session),
 ):
     """
-    保存一次完整的问答记录（用户问 + AI答，合并为一条记录）
+    保存一次完整问答；数据库中分别记录用户消息和 AI 消息。
     Body: { user_content, ai_content, anime_card(可选) }
     """
     body = body or {}
@@ -56,7 +56,7 @@ async def list_history(
     user_id: int = Depends(get_current_user_id),
     session: AsyncSession = Depends(get_async_session),
 ):
-    """获取当前用户的聊天历史（分页）"""
+    """分页读取当前用户的聊天历史。"""
     try:
         page = max(1, int(page))
         page_size = min(50, max(1, int(page_size)))
@@ -73,7 +73,7 @@ async def delete_history(
     user_id: int = Depends(get_current_user_id),
     session: AsyncSession = Depends(get_async_session),
 ):
-    """删除指定历史条目（只能删自己的）"""
+    """只删除属于当前用户的指定历史记录。"""
     affected = await delete_chat_message(session, msg_id, user_id)
     if affected == 0:
         return error_response("记录不存在或无权删除", 404)

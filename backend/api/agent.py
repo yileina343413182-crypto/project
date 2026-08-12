@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Agent Center API router."""
+"""Agent 中心接口：创建会话/任务、追加多轮消息并轮询执行结果。
+
+接口中的数据库操作使用异步会话；耗时 Agent 工作通过进程内任务队列交给
+同步后台线程执行，避免阻塞请求事件循环。
+"""
 
 from __future__ import annotations
 
@@ -28,10 +32,12 @@ router = APIRouter(prefix="/api/agent")
 
 
 def _task_payload(task_id: int, session_id: int, status: str = "queued") -> dict:
+    """生成创建任务后立即返回给前端的最小轮询凭据。"""
     return {"task_id": task_id, "session_id": session_id, "status": status}
 
 
 def _run_opinion_task(session_id: int, anime_id: int | None, name: str | None, query: str) -> dict:
+    """在线程池中执行舆情 Agent，并把最终回答写回会话消息。"""
     result = analyze_public_opinion(anime_id=anime_id, name=name, query=query)
     payload = {"session_id": session_id, **result}
     if result.get("error"):
@@ -50,6 +56,7 @@ def _run_recommendation_task(
     message: str,
     history: list[dict] | None = None,
 ) -> dict:
+    """在线程池中执行推荐图，并持久化便于下轮对话使用的回答。"""
     result = run_recommendation_agent(
         user_id,
         message,
@@ -68,6 +75,7 @@ async def analyze_opinion(
     user_id: int = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_async_session),
 ):
+    """创建舆情分析会话与后台任务，立即返回任务 ID。"""
     body = body or {}
     anime_id = body.get("anime_id")
     name = (body.get("name") or "").strip() or None
@@ -102,6 +110,7 @@ async def start_recommendation(
     user_id: int = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_async_session),
 ):
+    """创建推荐会话，并用首条用户消息启动推荐任务。"""
     body = body or {}
     query = (body.get("query") or "").strip()
     if not query:
@@ -127,6 +136,7 @@ async def recommendation_message(
     user_id: int = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_async_session),
 ):
+    """在既有推荐会话中追加消息，同一会话同时只允许一个运行中任务。"""
     body = body or {}
     session_id = body.get("session_id")
     message = (body.get("message") or "").strip()
@@ -164,6 +174,7 @@ async def task_detail(
     user_id: int = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_async_session),
 ):
+    """返回任务状态，供前端轮询 queued/running/succeeded/failed。"""
     task = await get_agent_task(db, user_id, task_id)
     if not task:
         return error_response("任务不存在或无权访问", 404)
@@ -175,6 +186,7 @@ async def sessions(
     user_id: int = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_async_session),
 ):
+    """列出当前用户的 Agent 会话摘要。"""
     return ok(await list_agent_sessions(db, user_id))
 
 
@@ -184,6 +196,7 @@ async def session_detail(
     user_id: int = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_async_session),
 ):
+    """返回会话详情及按时间排列的消息。"""
     session = await get_agent_session(db, user_id, session_id)
     if not session:
         return error_response("会话不存在或无权访问", 404)
@@ -196,6 +209,7 @@ async def remove_session(
     user_id: int = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_async_session),
 ):
+    """删除当前用户拥有的会话及其级联数据。"""
     affected = await delete_agent_session(db, user_id, session_id)
     if affected == 0:
         return error_response("会话不存在或无权删除", 404)

@@ -52,19 +52,25 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
-    """只初始化表结构，不改变模型、线程池或 Checkpointer 生命周期。"""
+    """初始化业务表，并在 ASGI 进程退出时释放数据库连接池。
+
+    模型、线程池和 LangGraph Checkpointer 各自由对应模块管理，不在这里
+    重复创建或销毁。
+    """
     init_user_tables()
     init_agent_tables()
     init_rag_tables()
     yield
+    # 关闭阶段主动释放连接，避免开发期热重载遗留数据库连接。
     await dispose_async_engines()
     dispose_sync_engines()
 
 
 def create_app() -> FastAPI:
-    """FastAPI 应用工厂。"""
+    """创建应用，并集中注册中间件、路由和统一异常格式。"""
     app = FastAPI(title="Anime Sentiment API", lifespan=_lifespan)
 
+    # 通配来源不能与凭据模式同时开启，这是浏览器 CORS 规范的限制。
     origins = ["*"] if CORS_ORIGINS == "*" else CORS_ORIGINS
     app.add_middleware(
         CORSMiddleware,
@@ -74,6 +80,7 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    # 路由在入口处统一挂载，便于快速看出后端暴露的功能模块。
     app.include_router(sentiment_router)
     app.include_router(topic_router)
     app.include_router(data_router)
@@ -83,7 +90,7 @@ def create_app() -> FastAPI:
     app.include_router(agent_router)
     app.include_router(rag_router)
 
-    # ===== 统一错误处理 =====
+    # ===== 统一错误处理：所有接口保持 {code, msg, data} 响应契约 =====
 
     @app.exception_handler(ApiError)
     async def api_error_handler(_request: Request, exc: ApiError):

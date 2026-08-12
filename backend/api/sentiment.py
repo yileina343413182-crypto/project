@@ -22,12 +22,12 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# 模型缓存（延迟加载）
+# 模型体积较大，首次预测时延迟加载，之后按模型名复用进程内实例。
 _model_cache = {}
 
 
 def _get_model(model_name=None):
-    """延迟加载情感分析模型"""
+    """按需加载 BERT/TextCNN，并缓存成功创建的预测器。"""
     if model_name is None:
         model_name = DEFAULT_MODEL
 
@@ -58,14 +58,14 @@ def _get_model(model_name=None):
 
 @router.get("/api/sentiment/stats/{anime_id}")
 async def sentiment_stats(anime_id: int, session: AsyncSession = Depends(get_async_session)):
-    """获取情感统计"""
+    """返回饼图使用的三类情感汇总。"""
     stats = await get_sentiment_stats(session, anime_id)
     return ok(stats)
 
 
 @router.get("/api/sentiment/trend/{anime_id}")
 async def sentiment_trend(anime_id: int, session: AsyncSession = Depends(get_async_session)):
-    """获取情感趋势"""
+    """返回按日期聚合的三类情感趋势。"""
     trend = await get_sentiment_trend(session, anime_id)
     return ok(trend)
 
@@ -76,7 +76,7 @@ async def sentiment_scatter(
     limit: int = Query(default=600),
     session: AsyncSession = Depends(get_async_session),
 ):
-    """获取逐条情感值（折线散点图数据）"""
+    """返回带文本和置信度坐标的情感散点样本。"""
     data = await get_sentiment_scatter(session, anime_id, limit=min(limit, 1000))
     return ok(data)
 

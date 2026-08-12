@@ -1,3 +1,2 @@
 # -*- coding: utf-8 -*-
-"""RAG services for Agent Center."""
-
+"""RAG 子系统：负责文档构建、向量索引、混合检索与效果评估。"""

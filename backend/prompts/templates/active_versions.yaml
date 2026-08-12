@@ -4,5 +4,5 @@ active_versions:
   anime_description_search: v1
   evidence_answering: rag-v1
   opinion_report: rag-v2-injection-guard
-  recommendation: rag-v3-injection-guard
+  recommendation: rag-v4-personalized-advisor
   recommendation_intent: v1

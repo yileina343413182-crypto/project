@@ -1,5 +1,10 @@
 # -*- coding: utf-8 -*-
-"""Public opinion diagnosis agent powered by LangChain."""
+"""基于 LangChain 的动漫舆情诊断 Agent。
+
+主流程先收集本地统计、代表评论、Bangumi 信息与 RAG 证据，再经过不可信
+文本过滤、上下文压缩、结构化生成和一次修复；任一步失败都可退回只依赖
+本地数据的确定性报告。
+"""
 
 from __future__ import annotations
 
@@ -39,6 +44,8 @@ from backend.agents.tools import (
 
 logger = logging.getLogger(__name__)
 
+
+# ===== 结构转换与上下文压缩 =====
 
 def _dump_schema(value: Any) -> dict:
     if hasattr(value, "model_dump"):
@@ -136,6 +143,7 @@ def build_compact_opinion_context(
     evidence_text_limit: int = 300,
     bangumi_summary_limit: int = 300,
 ) -> tuple[dict[str, Any], list[dict]]:
+    """压缩趋势、主题、评论和检索证据，控制发送给模型的上下文体积。"""
     bangumi = dict(context.get("bangumi") or {})
     if "summary" in bangumi:
         bangumi["summary"] = _truncate(bangumi.get("summary", ""), bangumi_summary_limit)
@@ -151,6 +159,8 @@ def build_compact_opinion_context(
     }
     return compact_context, _compact_evidence(evidence or [], evidence_limit, evidence_text_limit)
 
+# ===== 模型输出解析与结构校验 =====
+
 def _message_content(response: Any) -> str:
     content = getattr(response, "content", response)
     if isinstance(content, list):
@@ -165,6 +175,7 @@ def _message_content(response: Any) -> str:
 
 
 def _extract_json_object(text: str) -> dict:
+    """从纯 JSON 或 Markdown 代码块中提取第一个 JSON 对象。"""
     clean = (text or "").strip()
     if clean.startswith("```"):
         chunks = clean.split("```")
@@ -182,6 +193,7 @@ def _extract_json_object(text: str) -> dict:
 
 
 def _normalize_llm_report_data(data: dict) -> dict:
+    """把模型常见的空值和类型偏差修正为 Schema 可校验的形状。"""
     normalized = dict(data or {})
     for key in (
         "positive_points",
@@ -227,6 +239,7 @@ def _normalize_llm_report_data(data: dict) -> dict:
 
 
 def _validate_llm_report(data: dict) -> dict:
+    """用当前 Pydantic 版本校验并标准化舆情报告。"""
     data = _normalize_llm_report_data(data)
     if hasattr(LLMOpinionReportSchema, "model_validate"):
         report = LLMOpinionReportSchema.model_validate(data)
@@ -240,7 +253,7 @@ def _invoke_structured_report(
     prompt: str,
     prompt_template=None,
 ) -> dict:
-    """Generate the final report without entering a LangGraph agent."""
+    """优先使用结构化输出能力，失败时回退到文本 JSON 解析。"""
     actual_prompt = prompt_template or get_prompt("opinion_report")
     messages = [
         {"role": "system", "content": actual_prompt.render_system()},
@@ -282,6 +295,7 @@ def _render_opinion_prompt(
     evidence: list[dict],
     prompt_template=None,
 ) -> str:
+    """渲染舆情提示词，并在最终边界处执行硬字符上限。"""
     actual_prompt = prompt_template or get_prompt("opinion_report")
     prompt = actual_prompt.render(
         query=query or "",
@@ -301,6 +315,7 @@ def _invoke_opinion_attempt(
     detail: str,
     prompt_template=None,
 ) -> tuple[dict, dict]:
+    """完成一次模型调用、输出解析和 Schema 校验，并记录耗时。"""
     start = time.perf_counter()
     report_data = _invoke_structured_report(
         model,
@@ -317,7 +332,10 @@ def _invoke_opinion_attempt(
     return report_data, step
 
 
+# ===== 数据预取与主流程 =====
+
 def _prefetch(anime_id: int | None = None, name: str | None = None) -> tuple[dict | None, dict[str, Any], list[dict]]:
+    """一次收集报告需要的本地分析结果、外部元数据与执行步骤。"""
     steps: list[dict] = []
     anime, step = timed_step("get_anime_info", fetch_anime_info, anime_id, name)
     steps.append(step)
@@ -352,6 +370,7 @@ def _prefetch(anime_id: int | None = None, name: str | None = None) -> tuple[dic
 
 
 def analyze_public_opinion(anime_id: int | None = None, name: str | None = None, query: str = "") -> dict:
+    """运行完整舆情诊断，返回报告、执行轨迹及是否触发降级。"""
     anime, context, steps = _prefetch(anime_id=anime_id, name=name)
     if not anime:
         return {
@@ -410,6 +429,7 @@ def analyze_public_opinion(anime_id: int | None = None, name: str | None = None,
         timeout=OPINION_LLM_TIMEOUT,
         max_tokens=OPINION_LLM_MAX_TOKENS,
     )
+    # 没有模型配置时直接返回有证据的本地报告，不让接口整体失败。
     if model is None:
         report = build_opinion_fallback(anime, context["stats"], context["topics"], context["comments"], context["aspect"])
         report.evidence_refs = refs
@@ -446,6 +466,7 @@ def analyze_public_opinion(anime_id: int | None = None, name: str | None = None,
         report_data["agent_steps"] = steps + report_data.get("agent_steps", [])
         return {"anime": anime, "report": report_data, "agent_steps": report_data["agent_steps"], "fallback": False}
     except Exception as first_exc:
+        # 首次结构化结果失败后，只允许一次更小上下文的修复尝试。
         logger.warning("Opinion structured report failed; retrying with tighter compact context: %s", first_exc)
         steps.append({
             "name": "structured_opinion_report",

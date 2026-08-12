@@ -324,7 +324,7 @@ class RecommendationGraphTest(unittest.TestCase):
         )
         self.assertEqual(
             payload["result"]["prompt_trace"]["template_version"],
-            "rag-v3-injection-guard",
+            "rag-v4-personalized-advisor",
         )
         self.assertEqual(
             len(payload["result"]["prompt_trace"]["template_hash"]),

@@ -1,2 +1,2 @@
 # -*- coding: utf-8 -*-
-"""Agent Center package."""
+"""Agent 中心：包含工作流、工具、任务队列、状态持久化与降级策略。"""

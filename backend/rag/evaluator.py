@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Lightweight RAG evaluation runner."""
+"""轻量 RAG 回归评估：运行固定查询并持久化命中与证据引用结果。"""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from backend.rag.storage import create_eval_run, finish_eval_run, save_eval_item
 
 
 def run_builtin_eval(top_k: int = 5) -> dict:
+    """执行内置用例，统计命中率并保存每条用例的检索模式和引用。"""
     run_id = create_eval_run()
     cases = _default_cases()
     passed = 0
@@ -50,6 +51,7 @@ def run_builtin_eval(top_k: int = 5) -> dict:
 
 
 def _default_cases() -> list[dict]:
+    """从现有动漫中构造少量可重复的冒烟用例，不宣称完整质量评估。"""
     items = get_all_anime()[:5]
     cases = []
     for item in items:
@@ -60,4 +62,3 @@ def _default_cases() -> list[dict]:
     if not cases:
         cases.append({"query": "动漫 评论 情感 推荐", "anime_id": None})
     return cases
-

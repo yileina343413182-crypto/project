@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""后端配置。"""
+"""集中读取后端配置，并为数据库、模型、Agent 和认证提供默认值。
+
+环境变量优先于本地配置文件；模块只负责组装配置，不在这里建立连接或
+调用外部服务。
+"""
 
 import os
 from pathlib import Path
@@ -10,7 +14,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def _load_local_env(path: str | None = None) -> None:
-    """Load the ignored local env file without overriding process settings."""
+    """加载本机私有环境文件，但不覆盖进程中已经设置的变量。"""
     env_path = Path(path or os.path.join(PROJECT_ROOT, ".env.mysql.local"))
     if not env_path.is_file():
         return
@@ -33,6 +37,7 @@ _load_local_env()
 
 
 def _get_bool_env(name, default=False):
+    """把常见的真值字符串转换为布尔值，缺失时返回默认值。"""
     value = os.environ.get(name)
     if value is None:
         return default
@@ -40,6 +45,7 @@ def _get_bool_env(name, default=False):
 
 
 def _get_int_env(name, default):
+    """读取整数环境变量；非法值按未配置处理。"""
     value = os.environ.get(name)
     if value is None:
         return default
@@ -50,6 +56,7 @@ def _get_int_env(name, default):
 
 
 def _get_cors_origins():
+    """将逗号分隔的来源转换为列表，并保留通配符语义。"""
     value = os.environ.get("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000")
     value = value.strip()
     if value == "*":
@@ -79,10 +86,12 @@ def _build_mysql_url(driver: str) -> str | None:
 
 
 def _sqlite_url(driver: str) -> str:
+    """使用绝对路径构造指定驱动的 SQLite SQLAlchemy URL。"""
     path = Path(DB_PATH).resolve().as_posix()
     return f"sqlite+{driver}:///{path}"
 
 
+# 同步 URL 供离线任务和 Agent 使用，异步 URL 供 FastAPI 请求使用。
 # 未配置 MySQL 凭据时继续使用 SQLite，确保迁移分支可回归且不会误连数据库。
 # 正式切换只需提供 DATABASE_URL / ASYNC_DATABASE_URL 或 MYSQL_* 环境变量。
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
@@ -131,6 +140,7 @@ CORS_ORIGINS = _get_cors_origins()
 LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "qwen").strip().lower()
 
 # 不同服务商只能读取对应的密钥，避免 Qwen 误用 OPENAI_API_KEY
+# 密钥只在当前提供商对应的变量中查找，避免误把其他平台密钥发送出去。
 _PROVIDER_API_KEYS = {
     "qwen": (
         "LLM_API_KEY",
@@ -159,6 +169,7 @@ LLM_API_KEY = next(
     "",
 )
 
+# 预设只给出兼容接口地址和默认模型，显式环境变量仍具有最高优先级。
 _LLM_PRESETS = {
     "qwen": {
         "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
@@ -193,10 +204,31 @@ LLM_MODEL = os.environ.get(
 LLM_TIMEOUT = _get_int_env("LLM_TIMEOUT", 30)
 LLM_MAX_RETRIES = _get_int_env("LLM_MAX_RETRIES", 0)
 
+# ===== Rerank 配置 =====
+RERANK_PROVIDER = os.environ.get("RERANK_PROVIDER", "qwen").strip().lower()
+RERANK_WORKSPACE_ID = os.environ.get("RERANK_WORKSPACE_ID", "").strip()
+RERANK_MODEL = os.environ.get("RERANK_MODEL", "qwen3-rerank").strip()
+RERANK_BASE_URL = os.environ.get("RERANK_BASE_URL", "").strip()
+if not RERANK_BASE_URL and RERANK_WORKSPACE_ID:
+    RERANK_BASE_URL = (
+        f"https://{RERANK_WORKSPACE_ID}.cn-beijing.maas.aliyuncs.com/"
+        "compatible-api/v1/reranks"
+    )
+RERANK_API_KEY = next(
+    (
+        os.environ.get(name, "").strip()
+        for name in ("RERANK_API_KEY", "DASHSCOPE_API_KEY", "QWEN_API_KEY", "LLM_API_KEY")
+        if os.environ.get(name, "").strip()
+    ),
+    "",
+)
+RERANK_TIMEOUT = _get_int_env("RERANK_TIMEOUT", 20)
+RERANK_MAX_DOCUMENT_CHARS = _get_int_env("RERANK_MAX_DOCUMENT_CHARS", 6000)
+
 # ===== Opinion Agent LLM budget =====
 OPINION_LLM_TIMEOUT = _get_int_env("OPINION_LLM_TIMEOUT", LLM_TIMEOUT)
-OPINION_LLM_MAX_TOKENS = _get_int_env("OPINION_LLM_MAX_TOKENS", 900)
-OPINION_LLM_REPAIR_MAX_TOKENS = _get_int_env("OPINION_LLM_REPAIR_MAX_TOKENS", 700)
+OPINION_LLM_MAX_TOKENS = _get_int_env("OPINION_LLM_MAX_TOKENS", 1800)
+OPINION_LLM_REPAIR_MAX_TOKENS = _get_int_env("OPINION_LLM_REPAIR_MAX_TOKENS", 2000)
 OPINION_PROMPT_MAX_CHARS = _get_int_env("OPINION_PROMPT_MAX_CHARS", 7000)
 
 # ===== 推荐 Agent 2.0 配置 =====

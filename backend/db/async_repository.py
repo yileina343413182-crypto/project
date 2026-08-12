@@ -1,4 +1,8 @@
-"""AsyncSession CRUD used only by the FastAPI request layer."""
+"""FastAPI 请求层专用的异步 CRUD。
+
+函数接收请求作用域内的 ``AsyncSession``，不自行提交事务；提交、回滚与
+关闭统一由 ``get_async_session`` 依赖处理。
+"""
 
 from __future__ import annotations
 
@@ -12,6 +16,7 @@ from backend.db.models import Anime, ChatHistory, Comment, Topic, User
 
 
 def _date_value(value):
+    """把数据库日期转换为可 JSON 序列化的字符串。"""
     if isinstance(value, datetime):
         return value.strftime("%Y-%m-%d %H:%M:%S")
     if isinstance(value, date):
@@ -20,6 +25,7 @@ def _date_value(value):
 
 
 def _json_value(value, default=None):
+    """兼容 JSON 列对象与旧库中的 JSON 字符串。"""
     if value is None:
         return default
     if isinstance(value, str):
@@ -30,7 +36,10 @@ def _json_value(value, default=None):
     return value
 
 
+# ===== 用户与聊天历史 =====
+
 async def create_user(session: AsyncSession, username: str, password_hash: str) -> int:
+    """新增用户并 flush，以便在提交前取得自增 ID。"""
     user = User(username=username, password_hash=password_hash)
     session.add(user)
     await session.flush()
@@ -81,6 +90,7 @@ async def get_chat_history(
     page: int = 1,
     page_size: int = 20,
 ) -> dict:
+    """按时间倒序分页返回当前用户的聊天记录。"""
     offset = (page - 1) * page_size
     total = await session.scalar(
         select(func.count()).select_from(ChatHistory).where(ChatHistory.user_id == user_id)
@@ -118,7 +128,10 @@ async def delete_chat_message(session: AsyncSession, msg_id: int, user_id: int) 
     return result.rowcount
 
 
+# ===== 动漫、评论与分析结果查询 =====
+
 async def get_all_anime(session: AsyncSession) -> list[dict]:
+    """查询动漫列表，并附带各动漫的评论总数。"""
     rows = (
         await session.execute(
             select(
@@ -142,6 +155,7 @@ async def get_comments(
     page: int = 1,
     page_size: int = 20,
 ) -> dict:
+    """按动漫和可选情感标签分页查询评论。"""
     filters = [Comment.anime_id == anime_id]
     if sentiment:
         filters.append(Comment.sentiment_label == sentiment)
@@ -176,6 +190,7 @@ async def get_comments(
 
 
 async def get_sentiment_stats(session: AsyncSession, anime_id: int) -> dict:
+    """汇总正向、中性、负向评论数量及总数。"""
     rows = (
         await session.execute(
             select(Comment.sentiment_label, func.count().label("cnt"))
@@ -192,6 +207,7 @@ async def get_sentiment_stats(session: AsyncSession, anime_id: int) -> dict:
 
 
 async def get_sentiment_scatter(session: AsyncSession, anime_id: int, limit: int = 600) -> list[dict]:
+    """把模型置信度映射到前端散点图使用的正负坐标。"""
     rows = (
         await session.execute(
             select(Comment.sentiment_label, Comment.sentiment_score)
@@ -215,6 +231,7 @@ async def get_sentiment_scatter(session: AsyncSession, anime_id: int, limit: int
 
 
 async def get_sentiment_trend(session: AsyncSession, anime_id: int) -> list[dict]:
+    """按发布日期聚合每天的三类情感数量。"""
     day = func.date(Comment.publish_time).label("date")
     rows = (
         await session.execute(
@@ -243,6 +260,7 @@ async def get_sentiment_trend(session: AsyncSession, anime_id: int) -> list[dict
 
 
 async def get_topics(session: AsyncSession, anime_id: int) -> list[dict]:
+    """返回指定动漫的 LDA 主题及已解析关键词。"""
     rows = (
         await session.execute(
             select(Topic.topic_id, Topic.keywords, Topic.weight)
@@ -257,6 +275,7 @@ async def get_topics(session: AsyncSession, anime_id: int) -> list[dict]:
 
 
 async def get_wordcloud_contents(session: AsyncSession, anime_id: int) -> list[str]:
+    """只读取词云计算所需的评论正文，分词在同步线程池中完成。"""
     return list(
         (
             await session.scalars(select(Comment.content).where(Comment.anime_id == anime_id))
@@ -265,6 +284,7 @@ async def get_wordcloud_contents(session: AsyncSession, anime_id: int) -> list[s
 
 
 async def get_aspect_sentiment(session: AsyncSession, anime_id: int) -> dict:
+    """按方面关键词分别聚合三类情感数量。"""
     aspects = {
         "作画": ["作画", "画面", "画质", "画风", "美术", "特效", "CG"],
         "剧情": ["剧情", "故事", "情节", "剧本", "结局", "设定", "逻辑", "伏笔"],

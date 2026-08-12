@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""OpenAI-compatible embedding client with safe fallback."""
+"""OpenAI 兼容的 Embedding 客户端，并为不可用场景提供显式状态。
+
+模块不会静默伪造向量：缺少密钥、请求失败或响应维度异常时返回 ``None``，
+上层检索据此转入关键词/实时数据库降级。
+"""
 
 from __future__ import annotations
 
@@ -20,6 +24,7 @@ EMBEDDING_PROVIDER = os.environ.get(
 ).strip().lower()
 
 
+# 不同提供商的默认地址和模型；显式环境变量仍具有最高优先级。
 _EMBEDDING_PRESETS = {
     "qwen": {
         "base_url": (
@@ -86,6 +91,7 @@ except ValueError:
 
 
 class EmbeddingClient:
+    """封装批量 Embedding 请求、重试边界和返回值校验。"""
     def __init__(
         self,
         api_key: str = EMBEDDING_API_KEY,
@@ -98,12 +104,14 @@ class EmbeddingClient:
 
     @property
     def available(self) -> bool:
+        """仅表示已配置调用凭据，不代表远端服务当前一定可达。"""
         return bool(self.api_key)
 
     def embed_texts(
         self,
         texts: Iterable[str],
     ) -> list[list[float]] | None:
+        """按批次生成向量；任一批次失败时返回 None 让上层整体降级。"""
         items = list(texts)
 
         if not items or not self.available:
@@ -166,12 +174,14 @@ class EmbeddingClient:
 
 
 def stable_content_hash(content: str) -> str:
+    """计算稳定内容哈希，用于判断 RAG 文档是否发生变化。"""
     return hashlib.sha256(
         (content or "").encode("utf-8")
     ).hexdigest()
 
 
 def embedding_status() -> dict:
+    """返回管理接口展示的提供商、模型和配置可用性。"""
     return {
         "provider": EMBEDDING_PROVIDER,
         "model": EMBEDDING_MODEL,

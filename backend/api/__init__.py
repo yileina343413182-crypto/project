@@ -1,2 +1,2 @@
 # -*- coding: utf-8 -*-
-"""FastAPI APIRouter 包。"""
+"""FastAPI 路由层：校验请求、调用业务函数并统一包装响应。"""

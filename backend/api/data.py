@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-数据查询 API
+基础数据查询 API
 
 端点：
     GET /api/anime/list                  → 所有动漫列表
@@ -19,7 +19,7 @@ router = APIRouter()
 
 @router.get("/api/anime/list")
 async def anime_list(session: AsyncSession = Depends(get_async_session)):
-    """获取所有动漫列表"""
+    """获取所有动漫及其评论数量。"""
     data = await get_all_anime(session)
     return ok(data)
 
@@ -33,7 +33,7 @@ async def comments(
     session: AsyncSession = Depends(get_async_session),
 ):
     """
-    分页查询评论
+    分页获取指定动漫评论，可按情感标签过滤。
 
     查询参数：
         sentiment: 情感标签过滤 (positive/negative/neutral)

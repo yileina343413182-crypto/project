@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
-"""
-AI 推荐 API
+"""传统单轮 AI 推荐 API。
 
+该接口保留原有“意图识别 → 本地匹配 → 描述补全”流程；多轮推荐 Agent
+位于 ``api.agent``，两者不是同一条调用链。
 """
 
 import logging
@@ -64,7 +65,7 @@ async def recommend(
         return ok(
             {
                 "anime_id": None, "name": None,
-                "llm_reply": "数据库中暂无动漫数据，请先运行 generate_demo_data.py。",
+                "llm_reply": "数据库中暂无动漫数据，请先爬取数据。",
                 "description": "", "bangumi_rating": 0,
                 "aspect_sentiment": {}, "match_type": "fallback",
                 "platform": "", "comment_count": 0,
@@ -74,7 +75,7 @@ async def recommend(
 
     anime_name_list = [a["name"] for a in anime_list]
 
-    # 2. LLM 意图提取（失败时自动降级）
+    # 2. LLM 意图提取（失败时自动降级）；同步网络调用放到线程池中。
     intent = await run_in_threadpool(extract_recommendation_intent, query, anime_name_list)
     matched_name = intent["matched_name"]
 
@@ -97,7 +98,7 @@ async def recommend(
             f"未能找到完全匹配的动漫，为您推荐库中最热门的「{target_anime['name']}」："
         )
 
-    # 4. 从 Bangumi 获取简介与评分
+    # 4. 从 Bangumi 获取简介与评分；外部服务失败不影响本地推荐主结果。
     description = ""
     bangumi_rating = 0.0
     bgm_info = await run_in_threadpool(search_anime, target_anime["name"])

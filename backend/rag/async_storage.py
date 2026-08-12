@@ -1,4 +1,8 @@
-"""Read/light-write AsyncSession RAG operations for FastAPI requests."""
+"""FastAPI 请求使用的异步 RAG 状态查询与轻量写入。
+
+真正的批量文档 upsert 和索引构建在线程池中使用同步 ``rag.storage``；这里
+主要创建任务、读取活动集合和返回评估记录。
+"""
 
 from __future__ import annotations
 
@@ -19,6 +23,7 @@ from backend.db.models import (
 
 
 def _value(value, default=None):
+    """把日期和 JSON 字符串转换为 API 可返回的 Python 值。"""
     if isinstance(value, datetime):
         return value.strftime("%Y-%m-%d %H:%M:%S")
     if isinstance(value, date):
@@ -32,6 +37,7 @@ def _value(value, default=None):
 
 
 def _job(job: RagIndexJob | None) -> dict | None:
+    """把索引任务 ORM 对象转换为状态接口结构。"""
     if job is None:
         return None
     return {
@@ -55,6 +61,7 @@ def _job(job: RagIndexJob | None) -> dict | None:
 async def create_index_job(
     session: AsyncSession, job_type: str, collection_name: str, anime_id: int | None = None
 ) -> int:
+    """创建 pending 索引任务并取得 ID，构建工作随后在线程池执行。"""
     record = RagIndexJob(job_type=job_type, collection_name=collection_name, anime_id=anime_id)
     session.add(record)
     await session.flush()
@@ -73,12 +80,14 @@ async def list_index_jobs(session: AsyncSession, limit: int = 8) -> list[dict]:
 
 
 async def get_active_collection(session: AsyncSession) -> str | None:
+    """读取当前检索入口指向的活动集合名。"""
     return await session.scalar(
         select(RagActiveCollection.collection_name).where(RagActiveCollection.id == 1)
     )
 
 
 async def count_documents(session: AsyncSession, collection_name: str | None = None) -> int:
+    """统计指定集合文档数；未指定时统计活动集合。"""
     statement = select(func.count()).select_from(RagDocument)
     if collection_name:
         statement = statement.where(RagDocument.collection_name == collection_name)
@@ -86,6 +95,7 @@ async def count_documents(session: AsyncSession, collection_name: str | None = N
 
 
 async def get_collection_metadata(session: AsyncSession, collection_name: str | None) -> dict | None:
+    """读取集合使用的 Embedding 模型、维度和构建摘要。"""
     if not collection_name:
         return None
     record = await session.get(RagCollectionMetadata, collection_name)

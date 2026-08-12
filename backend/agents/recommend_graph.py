@@ -1,5 +1,10 @@
 # -*- coding: utf-8 -*-
-"""Deterministic LangGraph workflow for Recommendation Agent 2.0."""
+"""推荐 Agent 2.0 的确定性 LangGraph 工作流。
+
+主链路为：加载/收集偏好 → 构建候选 → 检索并清洗证据 → 规划只读工具 →
+结构化生成 → 业务校验/有限修复 → 成功或本地降级。条件路由和循环次数都
+有明确上限，完整状态可由 Checkpoint 恢复。
+"""
 
 from __future__ import annotations
 
@@ -51,7 +56,7 @@ logger = logging.getLogger(__name__)
 
 
 class AgentState(TypedDict, total=False):
-    """Serializable state shared by the recommendation graph nodes."""
+    """所有图节点共享且可序列化的状态；节点只返回自己更新的字段。"""
 
     user_id: int
     query: str
@@ -84,6 +89,7 @@ class AgentState(TypedDict, total=False):
     agent_steps: Annotated[list[dict[str, Any]], operator.add]
 
 
+# 问卷按固定顺序补齐四类偏好；用户可以跳过单项或直接结束问卷。
 QUESTIONNAIRE_SLOTS = (
     "preferred_genres",
     "preferred_moods",
@@ -113,6 +119,8 @@ SKIP_ALL_ANSWERS = {
     "直接推荐", "不用再问了", "跳过后续", "这些就够了",
 }
 
+
+# ===== 纯函数辅助：解析回答、合并偏好和计算问卷进度 =====
 
 def _recommend_helpers():
     # Imported lazily to preserve the public recommend_agent module as the
@@ -166,6 +174,7 @@ def _extract_dislikes(value: str) -> list[str]:
 
 
 def _extract_slot(slot: str, answer: str) -> list[str]:
+    """按当前问卷槽位解析用户回答，优先识别预定义题材/氛围词。"""
     normalized = _normalize(answer)
     if normalized in SKIP_ANSWERS or normalized in SKIP_ALL_ANSWERS:
         return []
@@ -189,6 +198,7 @@ def _result_metadata(message: dict) -> dict:
 
 
 def _pending_slot(history: list[dict]) -> str:
+    """从历史中找到 Agent 上一次要求用户回答的偏好槽位。"""
     for message in reversed(history or []):
         if message.get("role") not in {"agent", "assistant"}:
             continue
@@ -198,6 +208,7 @@ def _pending_slot(history: list[dict]) -> str:
 
 
 def _skipped_slots(history: list[dict], pending: str, query: str) -> set[str]:
+    """结合历史问答和本轮输入恢复用户显式跳过的槽位。"""
     skipped: set[str] = set()
     messages = history or []
     for index, message in enumerate(messages):
@@ -238,6 +249,7 @@ def _merge_preferences(preferences: dict, updates: dict[str, list[Any]]) -> dict
 
 
 def _progress(preferences: dict, skipped: set[str]) -> tuple[str, dict[str, Any]]:
+    """返回下一个待询问槽位和前端展示所需的完成进度。"""
     completed = [
         slot
         for slot in QUESTIONNAIRE_SLOTS
@@ -292,7 +304,10 @@ def _search_query(query: str, preferences: dict) -> str:
     return " ".join(_unique(parts))
 
 
+# ===== 阶段一：输入安全检查与偏好问卷 =====
+
 def load_preferences(state: AgentState) -> dict:
+    """读取用户已持久化的长期偏好。"""
     preferences, step = timed_step(
         "get_user_preferences",
         get_user_preferences,
@@ -302,6 +317,7 @@ def load_preferences(state: AgentState) -> dict:
 
 
 def inspect_user_input(state: AgentState) -> dict:
+    """检查本轮输入和近期历史；高风险时禁用工具规划与偏好写入。"""
     _, plain_step, _, _, _ = _recommend_helpers()
     query_inspection = inspect_untrusted_text(
         state.get("query", ""),
@@ -357,6 +373,7 @@ def inspect_user_input(state: AgentState) -> dict:
 
 
 def collect_preferences(state: AgentState) -> dict:
+    """从安全输入中提取偏好，去重合并后写入长期记忆。"""
     _, plain_step, _, _, _ = _recommend_helpers()
     query = state.get("safe_query") or state["query"]
     high_risk = state.get("input_security", {}).get("risk") == "high"
@@ -405,6 +422,7 @@ def collect_preferences(state: AgentState) -> dict:
 
 
 def assess_preferences(state: AgentState) -> dict:
+    """判断问卷是否完整，并决定继续提问还是进入候选检索。"""
     _, plain_step, _, _, _ = _recommend_helpers()
     next_slot, progress = _progress(
         state.get("preferences", {}),
@@ -419,10 +437,12 @@ def assess_preferences(state: AgentState) -> dict:
 
 
 def route_preferences(state: AgentState) -> str:
+    """偏好未补齐时结束本轮并提问，否则继续构建候选。"""
     return "ask_preference" if state.get("next_preference_slot") else "candidates"
 
 
 def ask_preference(state: AgentState) -> dict:
+    """返回单个澄清问题；本轮不生成推荐结果。"""
     _, plain_step, _, _, _ = _recommend_helpers()
     slot = state["next_preference_slot"]
     step = plain_step("ask_preference_question", "success", f"requesting {slot}")
@@ -443,7 +463,10 @@ def ask_preference(state: AgentState) -> dict:
     }
 
 
+# ===== 阶段二：候选构建、RAG 检索与不可信证据清洗 =====
+
 def build_candidates(state: AgentState) -> dict:
+    """根据查询和偏好生成数量受限、带本地评分的候选池。"""
     candidates, step = timed_step(
         "search_anime_candidates",
         build_candidate_pool,
@@ -457,6 +480,7 @@ def build_candidates(state: AgentState) -> dict:
 
 
 def retrieve_evidence(state: AgentState) -> dict:
+    """为候选逐一检索归属明确的证据，并记录覆盖率诊断。"""
     _, plain_step, _, _, _ = _recommend_helpers()
     started = time.perf_counter()
     candidates = state.get("candidates", [])
@@ -509,10 +533,12 @@ def retrieve_evidence(state: AgentState) -> dict:
 
 
 def route_evidence(state: AgentState) -> str:
+    """检索发生系统错误时降级，否则进入证据安全检查。"""
     return "fallback" if state.get("fallback_reason") else "inspect_evidence"
 
 
 def inspect_evidence(state: AgentState) -> dict:
+    """过滤高风险检索文本，并重新计算清洗后的证据覆盖率。"""
     _, plain_step, _, _, _ = _recommend_helpers()
     cleaned, security = sanitize_evidence_map(
         state.get("evidence_map", {})
@@ -546,7 +572,10 @@ def inspect_evidence(state: AgentState) -> dict:
     }
 
 
+# ===== 阶段三：提示词打包与有界只读工具循环 =====
+
 def pack_context(state: AgentState) -> dict:
+    """按预算打包候选证据，固定提示词版本并记录可追踪元数据。"""
     _, plain_step, render_prompt, _, _ = _recommend_helpers()
     packed, budget = pack_recommendation_context(
         state.get("candidates", []),
@@ -589,6 +618,7 @@ def pack_context(state: AgentState) -> dict:
 
 
 def agent_decide(state: AgentState) -> dict:
+    """让模型决定是否调用只读工具；高风险输入和无模型配置会跳过。"""
     _, plain_step, _, _, _ = _recommend_helpers()
     if state.get("input_security", {}).get("risk") == "high":
         return {
@@ -682,6 +712,7 @@ def agent_decide(state: AgentState) -> dict:
 
 
 def route_agent_decision(state: AgentState) -> str:
+    """按工具请求、轮数和剩余图步数路由，防止工具无限循环。"""
     if state.get("fallback_reason"):
         return "fallback"
     messages = state.get("messages", [])
@@ -697,6 +728,7 @@ def route_agent_decision(state: AgentState) -> str:
 
 
 def record_tool_round(state: AgentState) -> dict:
+    """在 ToolNode 完成后递增工具轮数并追加执行轨迹。"""
     _, plain_step, _, _, _ = _recommend_helpers()
     rounds = state.get("tool_rounds", 0) + 1
     return {
@@ -712,6 +744,7 @@ def record_tool_round(state: AgentState) -> dict:
 
 
 def tool_limit(state: AgentState) -> dict:
+    """把超过工具循环上限的执行转入可解释的本地降级。"""
     _, plain_step, _, _, _ = _recommend_helpers()
     reason = (
         f"tool loop limit reached after {state.get('tool_rounds', 0)} rounds"
@@ -722,7 +755,10 @@ def tool_limit(state: AgentState) -> dict:
     }
 
 
+# ===== 阶段四：结构化生成、校验、有限修复与结果组装 =====
+
 def generate(state: AgentState) -> dict:
+    """合并打包上下文和最近工具结果，生成结构化推荐。"""
     _, plain_step, _, structured, _ = _recommend_helpers()
     model = get_chat_model(
         0.35,
@@ -790,10 +826,12 @@ def generate(state: AgentState) -> dict:
 
 
 def route_generation(state: AgentState) -> str:
+    """生成异常时降级，成功时必须先经过业务校验。"""
     return "fallback" if state.get("fallback_reason") else "validate"
 
 
 def validate(state: AgentState) -> dict:
+    """校验推荐数量、候选边界、证据引用和问卷状态。"""
     _, plain_step, _, _, validate_result = _recommend_helpers()
     data, errors = validate_result(
         dict(state.get("llm_data", {})),
@@ -816,6 +854,7 @@ def validate(state: AgentState) -> dict:
 
 
 def route_validation(state: AgentState) -> str:
+    """无错误则成功；有错误且仍有次数则修复，否则降级。"""
     if not state.get("validation_errors"):
         return "success"
     if state.get("repair_attempts", 0) < RECOMMEND_LLM_REPAIR_RETRIES:
@@ -824,6 +863,7 @@ def route_validation(state: AgentState) -> str:
 
 
 def repair(state: AgentState) -> dict:
+    """把校验错误和原始结果交给低温模型做一次有界结构修复。"""
     _, plain_step, _, structured, _ = _recommend_helpers()
     attempt = state.get("repair_attempts", 0) + 1
     model = get_chat_model(
@@ -886,10 +926,12 @@ def repair(state: AgentState) -> dict:
 
 
 def route_repair(state: AgentState) -> str:
+    """修复调用成功后重新校验，调用异常则直接降级。"""
     return "fallback" if state.get("fallback_reason") else "validate"
 
 
 def finalize_success(state: AgentState) -> dict:
+    """补齐候选元数据、证据、追踪和安全诊断，形成最终成功响应。"""
     _, plain_step, _, _, _ = _recommend_helpers()
     data = dict(state.get("llm_data", {}))
     updates, suggestion_security = sanitize_preference_suggestions(
@@ -967,6 +1009,7 @@ def finalize_success(state: AgentState) -> dict:
 
 
 def fallback(state: AgentState) -> dict:
+    """使用已有候选和证据生成同结构本地结果，并保留失败原因。"""
     local_result, _, _, _, _ = _recommend_helpers()
     errors = state.get("validation_errors", [])
     reason = state.get("fallback_reason") or (
@@ -1001,7 +1044,10 @@ def fallback(state: AgentState) -> dict:
     }
 
 
+# ===== 图定义、Checkpoint 与公开运行入口 =====
+
 def create_recommendation_graph(checkpointer=None):
+    """注册 18 个节点及条件边，编译为可注入 Checkpointer 的图。"""
     builder = StateGraph(AgentState)
     builder.add_node("load_preferences", load_preferences)
     builder.add_node("inspect_user_input", inspect_user_input)
@@ -1078,6 +1124,7 @@ def create_recommendation_graph(checkpointer=None):
 
 @lru_cache(maxsize=1)
 def _get_recommendation_checkpointer() -> SqliteSaver:
+    """进程内复用一个 SQLite Checkpointer 连接保存图状态。"""
     parent = os.path.dirname(RECOMMEND_CHECKPOINT_DB)
     if parent:
         os.makedirs(parent, exist_ok=True)
@@ -1090,6 +1137,7 @@ def _get_recommendation_checkpointer() -> SqliteSaver:
 
 @lru_cache(maxsize=1)
 def build_recommendation_graph():
+    """构建并缓存默认带 Checkpoint 的推荐图。"""
     return create_recommendation_graph(_get_recommendation_checkpointer())
 
 
@@ -1102,6 +1150,7 @@ def run_recommendation_graph(
     graph=None,
     auto_resume: bool = True,
 ) -> dict:
+    """运行一次推荐图；异常时可用同一 thread_id 从最近检查点续跑。"""
     runnable = graph or build_recommendation_graph()
     thread_id = (
         f"recommendation-task:{task_id}"

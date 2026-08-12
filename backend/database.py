@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Shared SQLAlchemy CRUD used by synchronous Agent and offline paths."""
+"""同步数据访问层，供 Agent、RAG 索引和离线任务复用。
+
+FastAPI 请求优先使用 ``db.async_repository``；本模块保持相同的数据形状，
+使同步工作流无需自己处理 ORM 对象或事务。
+"""
 
 from __future__ import annotations
 
@@ -17,6 +21,7 @@ from backend.db.session import get_sync_engine, session_scope
 
 
 def _date_value(value):
+    """把数据库日期转换为可 JSON 序列化的字符串。"""
     if isinstance(value, datetime):
         return value.strftime("%Y-%m-%d %H:%M:%S")
     if isinstance(value, date):
@@ -25,6 +30,7 @@ def _date_value(value):
 
 
 def _json_value(value, default=None):
+    """兼容 JSON 列对象与旧库中的 JSON 字符串。"""
     if value is None:
         return default
     if isinstance(value, str):
@@ -37,12 +43,13 @@ def _json_value(value, default=None):
 
 @contextmanager
 def orm_session(db_path: str | None = None):
-    """Open one synchronous Session for one thread/transaction."""
+    """打开一个线程/事务独占的同步会话，提交和回滚交给 session_scope。"""
     with session_scope(db_path=db_path) as session:
         yield session
 
 
 def init_user_tables(db_path=None):
+    """仅补建用户和聊天历史表，不重建或删除现有表。"""
     engine = get_sync_engine(db_path=db_path) if db_path else get_sync_engine()
     User.metadata.create_all(
         engine,
@@ -50,6 +57,8 @@ def init_user_tables(db_path=None):
         checkfirst=True,
     )
 
+
+# ===== 用户与聊天历史 =====
 
 def create_user(username, password_hash):
     with orm_session() as session:
@@ -113,6 +122,7 @@ def save_chat_exchange(user_id, user_content, ai_content, anime_card=None):
 
 
 def get_chat_history(user_id, page=1, page_size=20):
+    """按时间倒序分页，并返回前端需要的统一分页结构。"""
     offset = (page - 1) * page_size
     with orm_session() as session:
         total = session.scalar(
@@ -149,6 +159,8 @@ def delete_chat_message(msg_id, user_id):
         return result.rowcount
 
 
+# ===== 动漫、评论与分析结果查询 =====
+
 def _load_stopwords():
     stopwords = set()
     try:
@@ -163,6 +175,7 @@ def _load_stopwords():
 
 
 def get_all_anime():
+    """查询动漫列表，并附带各动漫的评论总数。"""
     statement = (
         select(
             Anime.id,
@@ -179,6 +192,7 @@ def get_all_anime():
 
 
 def get_comments(anime_id, sentiment=None, page=1, page_size=20):
+    """按动漫和可选情感标签分页查询评论。"""
     filters = [Comment.anime_id == anime_id]
     if sentiment:
         filters.append(Comment.sentiment_label == sentiment)
@@ -212,6 +226,7 @@ def get_comments(anime_id, sentiment=None, page=1, page_size=20):
 
 
 def get_sentiment_stats(anime_id):
+    """汇总正向、中性、负向评论数量及总数。"""
     with orm_session() as session:
         rows = session.execute(
             select(Comment.sentiment_label, func.count().label("cnt"))
@@ -227,6 +242,7 @@ def get_sentiment_stats(anime_id):
 
 
 def get_sentiment_scatter(anime_id, limit=600):
+    """把模型置信度映射到正负坐标，供前端绘制情感散点图。"""
     with orm_session() as session:
         rows = session.execute(
             select(Comment.sentiment_label, Comment.sentiment_score)
@@ -248,6 +264,7 @@ def get_sentiment_scatter(anime_id, limit=600):
 
 
 def get_sentiment_trend(anime_id):
+    """按发布日期聚合每天的三类情感数量。"""
     day = func.date(Comment.publish_time).label("date")
     with orm_session() as session:
         rows = session.execute(
@@ -275,6 +292,7 @@ def get_sentiment_trend(anime_id):
 
 
 def get_topics(anime_id):
+    """返回指定动漫的 LDA 主题及已解析关键词。"""
     with orm_session() as session:
         rows = session.execute(
             select(Topic.topic_id, Topic.keywords, Topic.weight)
@@ -292,6 +310,7 @@ def get_topics(anime_id):
 
 
 def _wordcloud_from_contents(contents, top_n=100):
+    """对评论分词、去停用词并统计高频词。"""
     stopwords = _load_stopwords()
     counter = Counter()
     for content in contents:
@@ -305,6 +324,7 @@ def _wordcloud_from_contents(contents, top_n=100):
 
 
 def get_wordcloud_data(anime_id, top_n=100):
+    """读取评论正文并生成词云所需的词频列表。"""
     with orm_session() as session:
         contents = session.scalars(
             select(Comment.content).where(Comment.anime_id == anime_id)
@@ -313,6 +333,7 @@ def get_wordcloud_data(anime_id, top_n=100):
 
 
 def get_aspect_sentiment(anime_id):
+    """按剧情、角色、画面等关键词粗粒度统计方面情感。"""
     aspects = {
         "作画": ["作画", "画面", "画质", "画风", "美术", "特效", "CG"],
         "剧情": ["剧情", "故事", "情节", "剧本", "结局", "设定", "逻辑", "伏笔"],

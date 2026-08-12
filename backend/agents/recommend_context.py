@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Candidate-level retrieval and bounded recommendation context."""
+"""为每个候选检索证据，并把推荐上下文压缩到可控字符预算内。"""
 from __future__ import annotations
 import re
 from difflib import SequenceMatcher
@@ -8,16 +8,19 @@ from backend.config import (RECOMMEND_COMMENT_MAX_CHARS, RECOMMEND_CONTEXT_MAX_C
 from backend.rag.retriever import search_evidence
 
 def compact_history(history):
+    """只保留最近有效对话，并统一 Agent 角色名、限制单条长度。"""
     return [{"role": "assistant" if x.get("role") == "agent" else x.get("role"), "content": str(x.get("content", ""))[:400]}
             for x in (history or [])[-RECOMMEND_HISTORY_LIMIT:] if x.get("role") in {"user", "agent", "assistant"} and x.get("content")]
 
 def _words(candidate):
+    """从候选主题中提取少量扩展检索词。"""
     out = []
     for topic in candidate.get("topics", [])[:3]:
         out.extend(str(topic).split("/"))
     return [x.strip() for x in out if x.strip()][:15]
 
 def retrieve_candidate_evidence(query, candidates, preferences):
+    """逐候选检索、校验归属、去重，避免证据串到其他动漫。"""
     result_map, modes, raw = {}, [], 0
     prefs = sum((preferences.get(k, [])[-5:] for k in ("likes", "preferred_moods", "preferred_genres")), [])
     for candidate in candidates[:RECOMMEND_EVIDENCE_CANDIDATES]:
@@ -41,6 +44,7 @@ def retrieve_candidate_evidence(query, candidates, preferences):
         "covered_candidates": covered, "raw_evidence_count": raw, "evidence_insufficient": covered == 0}
 
 def pack_recommendation_context(candidates, evidence_map):
+    """按全局字符预算裁剪证据，返回紧凑候选和预算诊断。"""
     before = sum(len(str(x.get("content", ""))) for values in evidence_map.values() for x in values)
     remaining, packed, count, truncated = RECOMMEND_CONTEXT_MAX_CHARS, [], 0, 0
     for candidate in candidates[:RECOMMEND_EVIDENCE_CANDIDATES]:

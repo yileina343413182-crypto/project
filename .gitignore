@@ -26,6 +26,8 @@ frontend/dist/
 # Generated databases and vector indexes
 *.db
 *.db-journal
+*.db-shm
+*.db-wal
 *.sqlite
 *.sqlite3
 data/chroma/

@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Pydantic schemas used by the Agent Center."""
+"""Agent 中心的结构化输入/输出契约。
+
+正常环境使用 Pydantic 校验；依赖尚未安装时提供最小兼容类，使确定性降级
+路径仍能导入并返回字典。
+"""
 
 from __future__ import annotations
 
@@ -8,6 +12,7 @@ from typing import Any
 try:
     from pydantic import BaseModel, Field
 except Exception:  # pragma: no cover - keeps fallback mode importable before deps install
+    # 这里只实现降级路径需要的构造和 model_dump，不模拟完整 Pydantic。
     class BaseModel:  # type: ignore
         def __init__(self, **kwargs):
             for key, value in kwargs.items():
@@ -19,6 +24,8 @@ except Exception:  # pragma: no cover - keeps fallback mode importable before de
     def Field(default=None, **kwargs):  # type: ignore
         return default
 
+
+# ===== 通用执行轨迹与检索证据 =====
 
 class AgentStep(BaseModel):
     name: str = Field(default="", description="Step or tool name")
@@ -57,6 +64,8 @@ class PromptTrace(BaseModel):
     security: dict[str, Any] = Field(default_factory=dict)
 
 
+# ===== 舆情 Agent 输出 =====
+
 class OpinionReportSchema(BaseModel):
     summary: str = Field(default="", description="Overall public opinion conclusion")
     sentiment_overview: str = Field(default="", description="Sentiment distribution summary")
@@ -87,6 +96,8 @@ class LLMOpinionReportSchema(BaseModel):
     representative_comments: dict[str, list[CommentEvidence]] = Field(default_factory=dict)
     evidence_refs: list[str] = Field(default_factory=list)
 
+
+# ===== 推荐 Agent 输出 =====
 
 class RecommendationEvidence(BaseModel):
     sentiment: dict[str, Any] = Field(default_factory=dict)
@@ -141,6 +152,8 @@ class RecommendationResponseSchema(BaseModel):
     validation_warnings: list[str] = Field(default_factory=list)
     tool_rounds: int = 0
 
+
+# ===== 可持久化的用户偏好 =====
 
 class PreferenceSchema(BaseModel):
     likes: list[str] = Field(default_factory=list)

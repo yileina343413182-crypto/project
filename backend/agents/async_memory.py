@@ -1,4 +1,8 @@
-"""AsyncSession Agent persistence for FastAPI request handlers only."""
+"""FastAPI 请求专用的异步 Agent 会话、消息和任务持久化。
+
+这里不执行耗时 Agent；只在请求事务中创建记录或读取状态。后台线程使用
+``agents.memory`` 中对应的同步函数更新任务。
+"""
 
 from __future__ import annotations
 
@@ -12,6 +16,7 @@ from backend.db.models import AgentMessage, AgentSession, AgentTask
 
 
 def _value(value, default=None):
+    """把日期和可能的 JSON 字符串转换为 API 可返回的 Python 值。"""
     if isinstance(value, (datetime, date)):
         return value.strftime("%Y-%m-%d %H:%M:%S")
     if isinstance(value, str) and default is not None:
@@ -25,6 +30,7 @@ def _value(value, default=None):
 async def create_agent_session(
     session: AsyncSession, user_id: int, agent_type: str, title: str
 ) -> int:
+    """创建 Agent 会话并 flush，立即取得会话 ID。"""
     record = AgentSession(user_id=user_id, agent_type=agent_type, title=title[:80] or agent_type)
     session.add(record)
     await session.flush()
@@ -38,6 +44,7 @@ async def save_agent_message(
     content: str,
     metadata: dict | None = None,
 ) -> int:
+    """保存一条用户/Agent 消息，并更新会话最后活动时间。"""
     record = AgentMessage(
         session_id=session_id,
         role=role,
@@ -61,6 +68,7 @@ async def create_agent_task(
     agent_type: str,
     input_data: dict | None = None,
 ) -> int:
+    """创建 queued 状态的后台任务记录。"""
     task = AgentTask(
         user_id=user_id,
         session_id=session_id,
@@ -87,6 +95,7 @@ async def get_agent_session(
     *,
     for_update: bool = False,
 ) -> dict | None:
+    """读取当前用户的会话和消息；可选加行锁用于追加消息。"""
     statement = select(AgentSession).where(
         AgentSession.user_id == user_id,
         AgentSession.id == session_id,
@@ -124,6 +133,7 @@ async def get_agent_session(
 
 
 def _task_dict(task: AgentTask | None) -> dict | None:
+    """把任务 ORM 对象转换为前端轮询所需的数据结构。"""
     if task is None:
         return None
     return {
@@ -154,6 +164,7 @@ async def get_agent_task(session: AsyncSession, user_id: int, task_id: int) -> d
 async def get_running_task_for_session(
     session: AsyncSession, user_id: int, session_id: int
 ) -> dict | None:
+    """查找会话中尚未结束的最新任务，用于阻止重复提交。"""
     task = await session.scalar(
         select(AgentTask)
         .where(

@@ -115,10 +115,7 @@ def check_data():
             print(f"""
 {YELLOW}  请先准备数据，有以下两种方式：{RESET}
 
-  {BOLD}方式1：生成演示数据（推荐，无需爬虫）{RESET}
-    python generate_demo_data.py
-
-  {BOLD}方式2：爬取真实数据{RESET}
+  {BOLD}方式1：爬取真实数据{RESET}
     python prepare_data.py --anime "进击的巨人" --platform bilibili --max_pages 30
 """)
             return False

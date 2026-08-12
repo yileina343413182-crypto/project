@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""LangChain tools and local tool helpers for Agent Center."""
+"""Agent 中心可调用的只读工具，以及候选构建等本地辅助函数。
+
+工具返回普通字典/列表，既可被 LangGraph ``ToolNode`` 调用，也可由确定性
+流程直接复用。涉及推荐候选的工具会校验 ID 是否属于当前状态候选池。
+"""
 
 from __future__ import annotations
 
@@ -37,6 +41,7 @@ except Exception:  # pragma: no cover
 
 
 def timed_step(name: str, fn, *args, **kwargs) -> tuple[Any, dict]:
+    """执行普通函数，并把成功/异常及耗时转换为统一步骤记录。"""
     start = time.perf_counter()
     try:
         data = fn(*args, **kwargs)
@@ -55,7 +60,10 @@ def timed_step(name: str, fn, *args, **kwargs) -> tuple[Any, dict]:
         }
 
 
+# ===== 不依赖 LangChain 的本地查询辅助函数 =====
+
 def fetch_anime_info(anime_id: int | None = None, name: str | None = None) -> dict | None:
+    """优先按 ID，再按精确名称/模糊相似度查找动漫。"""
     items = get_all_anime()
     if anime_id is not None:
         for item in items:
@@ -81,6 +89,7 @@ def fetch_anime_info(anime_id: int | None = None, name: str | None = None) -> di
 
 
 def fetch_representative_comments(anime_id: int, limit_per_label: int = 3) -> dict[str, list[dict]]:
+    """为三类情感分别抽取高置信度代表评论。"""
     result: dict[str, list[dict]] = {}
     with orm_session() as session:
         for label in ("positive", "neutral", "negative"):
@@ -114,6 +123,7 @@ def fetch_bangumi_info(name: str) -> dict:
     return data or {"bgm_id": None, "name": name, "summary": "", "rating": 0, "image": ""}
 
 def _get_sentiment_stats_map() -> dict[int, dict[str, int]]:
+    """一次聚合全部动漫情感计数，避免候选循环中重复查询。"""
     with orm_session() as session:
         rows = session.execute(
             select(Comment.anime_id, Comment.sentiment_label, func.count().label("cnt"))
@@ -134,6 +144,7 @@ def _get_sentiment_stats_map() -> dict[int, dict[str, int]]:
 
 
 def build_candidate_pool(query: str, user_id: int | None = None, limit: int = 8) -> list[dict]:
+    """综合名称匹配、情感、热度与用户负偏好生成有界候选池。"""
     keyword = query.strip().lower()
     preferences = load_preferences(user_id) if user_id else {}
     dislikes = " ".join(preferences.get("dislikes", [])) if preferences else ""
@@ -182,6 +193,8 @@ def build_candidate_pool(query: str, user_id: int | None = None, limit: int = 8)
         item["comments"] = fetch_representative_comments(item["id"], limit_per_label=1).get("positive", [])
     return top_candidates
 
+
+# ===== 暴露给 LangGraph ToolNode 的工具 =====
 
 @tool("get_anime_info")
 def get_anime_info_tool(anime_id: int | None = None, name: str | None = None) -> dict:
@@ -277,6 +290,7 @@ def update_user_preferences_tool(user_id: int, updates: dict) -> dict:
 
 
 def _recommend_candidate_from_state(state: dict, anime_id: int) -> dict:
+    """从注入的图状态中取候选，并拒绝候选池之外的 ID。"""
     candidates = {
         int(candidate["id"]): candidate
         for candidate in state.get("candidates", [])
@@ -291,7 +305,7 @@ def inspect_recommendation_candidate_tool(
     anime_id: int,
     state: Annotated[dict, InjectedState],
 ) -> dict:
-    """Inspect one allowed recommendation candidate and its prepared evidence."""
+    """读取一个候选的已打包统计与证据，不执行写操作。"""
     candidate = _recommend_candidate_from_state(state, anime_id)
     return {
         "anime_id": int(anime_id),
@@ -320,7 +334,7 @@ def search_candidate_comments_tool(
     query: str,
     state: Annotated[dict, InjectedState],
 ) -> dict:
-    """Search local comment evidence for one candidate from the current pool."""
+    """只在当前候选池指定动漫的范围内检索评论证据。"""
     _recommend_candidate_from_state(state, anime_id)
     return sanitize_search_result(
         search_evidence(query, anime_id=int(anime_id), top_k=3)
@@ -332,7 +346,7 @@ def compare_candidate_sentiment_tool(
     anime_ids: list[int],
     state: Annotated[dict, InjectedState],
 ) -> list[dict]:
-    """Compare sentiment and ranking scores for candidates from the current pool."""
+    """比较最多五个候选的情感与排序分数，并保持候选池边界。"""
     result = []
     for anime_id in anime_ids[:5]:
         candidate = _recommend_candidate_from_state(state, anime_id)

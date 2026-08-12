@@ -1,5 +1,5 @@
 ﻿# -*- coding: utf-8 -*-
-"""Chroma wrapper used by the RAG index and retriever."""
+"""Chroma 向量库的薄封装，统一延迟导入、批量写入和查询结果格式。"""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ CHROMA_PATH = os.environ.get("CHROMA_PATH", os.path.join(PROJECT_ROOT, "data", "
 
 
 def chroma_available() -> bool:
+    """检查 Chroma 依赖是否可导入，不创建客户端或集合。"""
     try:
         import chromadb  # noqa: F401
         return True
@@ -25,6 +26,7 @@ def chroma_available() -> bool:
 
 
 class ChromaVectorStore:
+    """按需创建持久化客户端，并封装集合级 upsert/query。"""
     def __init__(self, persist_path: str = CHROMA_PATH):
         self.persist_path = persist_path
         self._client = None
@@ -35,6 +37,7 @@ class ChromaVectorStore:
         return chroma_available()
 
     def _get_client(self):
+        """延迟创建客户端，避免不使用 RAG 时仍初始化 Chroma。"""
         if self._client is not None:
             return self._client
         if not self.available:
@@ -47,12 +50,14 @@ class ChromaVectorStore:
         return self._client
 
     def get_collection(self, collection_name: str):
+        """取得或创建使用余弦距离的命名集合。"""
         client = self._get_client()
         if client is None:
             return None
         return client.get_or_create_collection(name=collection_name)
 
     def upsert(self, collection_name: str, docs: list[dict], embedding_client: EmbeddingClient | None = None, batch_size: int = 10) -> int:
+        """分批生成向量并幂等写入；Embedding 失败时返回已写数量。"""
         if not docs:
             return 0
         embedding_client = embedding_client or EmbeddingClient()
@@ -94,6 +99,7 @@ class ChromaVectorStore:
         anime_id: int | None = None,
         embedding_client: EmbeddingClient | None = None,
     ) -> list[dict]:
+        """查询相似文档，可按 anime_id 过滤，并转换距离为相似度。"""
         embedding_client = embedding_client or EmbeddingClient()
         if not self.available or not embedding_client.available:
             return []
@@ -129,6 +135,7 @@ class ChromaVectorStore:
 
 
 def _clean_metadata(metadata: dict) -> dict:
+    """把 Chroma 不支持的复杂元数据转成字符串或基础标量。"""
     cleaned = {}
     for key, value in (metadata or {}).items():
         if value is None:

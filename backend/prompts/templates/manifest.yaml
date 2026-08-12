@@ -20,6 +20,7 @@ prompts:
       rag-v1: 4b3a171cec6338b5398d6ba80370176877b58648a1c12f5f3c6d0e0384f50c92
       rag-v2-bounded: 2dc0fa51d9a11de5295a7ba4373908fefad6f888ce955de2e33a3fde82b32cd1
       rag-v3-injection-guard: 05f4a1647d25004d768edcc8a851dcbbdbd5d3ae2bbf6063ca27e05f5b45c4eb
+      rag-v4-personalized-advisor: adeda5df70a67812f6cdc030edb9fe1f15e88f019c54eef7d20a822c90551c4f
   recommendation_intent:
     versions:
       v1: 55fd14495a37b15aa4be47050f5e67f9034cdde80683d33bfceb550324b9980f

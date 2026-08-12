@@ -1,32 +1,76 @@
 # -*- coding: utf-8 -*-
-"""Hybrid RAG retriever with Chroma-first and SQLite keyword fallback."""
+"""混合 RAG 检索器：Chroma 优先，数据库关键词与实时业务数据依次降级。"""
 
 from __future__ import annotations
+
+from concurrent.futures import ThreadPoolExecutor
 import json
+import logging
+
 from sqlalchemy import or_, select
 
 from backend.database import get_sentiment_stats, get_topics, orm_session
 from backend.db.models import Anime, Comment
 from backend.rag.embeddings import EMBEDDING_MODEL, EMBEDDING_PROVIDER, EmbeddingClient
+from backend.rag.reranker import BailianReranker
 from backend.rag.storage import get_active_collection, get_collection_metadata, keyword_search_documents, query_terms
 from backend.rag.vector_store import ChromaVectorStore
 
 
+logger = logging.getLogger(__name__)
+RRF_K = 60
+
+
 def search_evidence(query: str, anime_id: int | None = None, top_k: int = 6) -> dict:
+    """并行召回向量与关键词结果，经 RRF 融合、Rerank 后返回证据。"""
     collection_name = get_active_collection()
     embedding_client = EmbeddingClient()
-    mode = "chroma"
-    evidence = []
     collection_metadata = get_collection_metadata(collection_name)
     model_matches = bool(collection_metadata and collection_metadata.get("embedding_provider") == EMBEDDING_PROVIDER and collection_metadata.get("embedding_model") == EMBEDDING_MODEL)
+    candidate_k = max(top_k, top_k * 2)
+    vector_evidence = []
+    keyword_evidence = []
 
-    if collection_name and embedding_client.available and model_matches:
-        evidence = ChromaVectorStore().query(collection_name, query, top_k=top_k, anime_id=anime_id, embedding_client=embedding_client)
+    # 只有活动集合的模型元数据与当前配置一致时才查询向量，避免维度错配。
+    vector_enabled = bool(collection_name and embedding_client.available and model_matches)
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="rag-retrieve") as executor:
+        keyword_future = executor.submit(
+            keyword_search_documents,
+            query,
+            collection_name,
+            anime_id=anime_id,
+            top_k=candidate_k,
+        )
+        vector_future = None
+        if vector_enabled:
+            vector_future = executor.submit(
+                ChromaVectorStore().query,
+                collection_name,
+                query,
+                top_k=candidate_k,
+                anime_id=anime_id,
+                embedding_client=embedding_client,
+            )
+        try:
+            keyword_evidence = keyword_future.result()
+        except Exception as exc:
+            logger.warning("Keyword retrieval failed: %s", exc)
+        if vector_future is not None:
+            try:
+                vector_evidence = vector_future.result()
+            except Exception as exc:
+                logger.warning("Vector retrieval failed: %s", exc)
 
-    if not evidence:
-        mode = "keyword"
-        evidence = keyword_search_documents(query, collection_name, anime_id=anime_id, top_k=top_k)
+    fused_evidence = _rrf_fuse(vector_evidence, keyword_evidence)
+    evidence = fused_evidence
+    mode = "hybrid" if vector_evidence and keyword_evidence else "chroma" if vector_evidence else "keyword"
+    reranker = BailianReranker()
+    reranked = reranker.rerank(query, evidence, top_k=top_k)
+    rerank_applied = reranked is not None
+    if reranked is not None:
+        evidence = reranked
 
+    # 索引为空或损坏时，最后直接从动漫/评论业务表拼出基础证据。
     if not evidence:
         mode = "live_database"
         evidence = _live_database_evidence(query, anime_id=anime_id, top_k=top_k)
@@ -38,13 +82,44 @@ def search_evidence(query: str, anime_id: int | None = None, top_k: int = 6) -> 
         "model_matches_active_index": model_matches,
         "fallback_reason": "" if model_matches else "embedding_model_mismatch",
         "mode": mode,
-        "fallback": mode != "chroma",
+        "fallback": mode in {"keyword", "live_database"},
+        "fusion_method": "rrf",
+        "rerank_applied": rerank_applied,
+        "rerank_fallback_reason": "" if rerank_applied else "reranker_failed" if reranker.available else "reranker_not_configured",
+        "retrieval_counts": {
+            "vector": len(vector_evidence),
+            "keyword": len(keyword_evidence),
+            "fused": len(fused_evidence),
+        },
         "top_k": top_k,
         "evidence": _normalize_evidence(evidence[:top_k]),
     }
 
 
+def _rrf_fuse(vector_evidence: list[dict], keyword_evidence: list[dict], rrf_k: int = RRF_K) -> list[dict]:
+    """按文档 ID 去重并用倒数排名融合两路结果。"""
+    fused = {}
+    for source, items in (("vector", vector_evidence), ("keyword", keyword_evidence)):
+        for rank, item in enumerate(items, start=1):
+            metadata = item.get("metadata") or {}
+            key = metadata.get("doc_id") or f"content:{item.get('content', '')}"
+            if key not in fused:
+                fused[key] = {**item, "metadata": metadata, "rrf_score": 0.0}
+            fused[key]["rrf_score"] += 1.0 / (rrf_k + rank)
+            fused[key][f"{source}_rank"] = rank
+
+    result = sorted(
+        fused.values(),
+        key=lambda item: (-item["rrf_score"], str((item.get("metadata") or {}).get("doc_id", ""))),
+    )
+    for rank, item in enumerate(result, start=1):
+        item["rrf_score"] = round(item["rrf_score"], 8)
+        item["rank"] = rank
+    return result
+
+
 def evidence_doc_ids(evidence: list[dict]) -> list[str]:
+    """按出现顺序提取并去重证据 ID。"""
     ids = []
     for item in evidence:
         doc_id = (item.get("metadata") or {}).get("doc_id")
@@ -54,6 +129,7 @@ def evidence_doc_ids(evidence: list[dict]) -> list[str]:
 
 
 def _normalize_evidence(evidence: list[dict]) -> list[dict]:
+    """统一不同检索后端的字段，并按 doc_id 去重。"""
     result = []
     for idx, item in enumerate(evidence, start=1):
         metadata = item.get("metadata") or {}
@@ -65,11 +141,16 @@ def _normalize_evidence(evidence: list[dict]) -> list[dict]:
             "similarity": item.get("similarity", 0),
             "rank": item.get("rank", idx),
             "source_label": item.get("source_label", ""),
+            "rrf_score": item.get("rrf_score", 0),
+            "rerank_score": item.get("rerank_score"),
+            "vector_rank": item.get("vector_rank"),
+            "keyword_rank": item.get("keyword_rank"),
         })
     return result
 
 
 def _live_database_evidence(query: str, anime_id: int | None = None, top_k: int = 6) -> list[dict]:
+    """绕过索引直接读取业务表，生成最后一层基础证据。"""
     filters = [Comment.content != ""]
     if anime_id is not None:
         filters.append(Comment.anime_id == anime_id)

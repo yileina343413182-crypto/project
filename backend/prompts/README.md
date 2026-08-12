@@ -50,7 +50,7 @@ task halfway through generation or repair.
 
 ## Current guarded versions
 
-- `recommendation@rag-v3-injection-guard`
+- `recommendation@rag-v4-personalized-advisor`
 - `opinion_report@rag-v2-injection-guard`
 
 These templates explicitly mark user input, history, candidate data, comments,

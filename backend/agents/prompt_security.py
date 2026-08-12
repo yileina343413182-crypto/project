@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Deterministic trust-boundary helpers for untrusted LLM context."""
+"""用确定性规则守住用户输入、检索证据与 LLM 之间的信任边界。
+
+这些函数不判断内容观点是否正确，只识别提示词注入、角色伪装、控制字符等
+风险，并在内容进入模型上下文或长期偏好前清洗、截断或过滤。
+"""
 
 from __future__ import annotations
 
@@ -10,6 +14,7 @@ from typing import Any
 _CONTROL_CHARS = re.compile(
     r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\u200b-\u200f\u202a-\u202e\u2066-\u2069]"
 )
+# 每个信号由“名称、正则、风险权重”组成；累计分数映射为风险等级。
 _SIGNALS = (
     (
         "instruction_override",
@@ -75,6 +80,7 @@ def inspect_untrusted_text(
     source: str,
     max_chars: int = 4000,
 ) -> dict[str, Any]:
+    """清理并评分一段不可信文本，返回风险、命中信号和截断信息。"""
     text = _CONTROL_CHARS.sub("", str(value or ""))
     truncated = len(text) > max_chars
     text = text[:max_chars]
@@ -99,6 +105,7 @@ def inspect_untrusted_text(
 def sanitize_evidence_map(
     evidence_map: dict[int, list[dict]],
 ) -> tuple[dict[int, list[dict]], dict[str, Any]]:
+    """逐条检查候选证据：高风险项丢弃，中风险项保留但标记。"""
     cleaned: dict[int, list[dict]] = {}
     flagged_count = 0
     filtered_count = 0
@@ -139,7 +146,7 @@ def sanitize_evidence_map(
 
 
 def sanitize_search_result(result: dict) -> dict:
-    """Sanitize evidence returned by a model-selected read-only search tool."""
+    """清洗单次 RAG 搜索结果并把安全诊断附加到返回值。"""
     payload = dict(result or {})
     evidence = payload.get("evidence")
     if not isinstance(evidence, list):
@@ -153,6 +160,7 @@ def sanitize_search_result(result: dict) -> dict:
 def sanitize_preference_suggestions(
     updates: dict[str, Any],
 ) -> tuple[dict[str, list[str]], dict[str, Any]]:
+    """过滤 LLM 建议写入长期记忆的偏好，避免注入内容持久化。"""
     cleaned: dict[str, list[str]] = {}
     filtered_count = 0
     flags: set[str] = set()
@@ -183,6 +191,7 @@ def sanitize_preference_suggestions(
 def sanitize_comment_groups(
     comments: dict[str, list[dict]],
 ) -> tuple[dict[str, list[dict]], dict[str, Any]]:
+    """按情感分组清洗代表评论，并汇总被标记/过滤数量。"""
     cleaned: dict[str, list[dict]] = {}
     flagged_count = 0
     filtered_count = 0

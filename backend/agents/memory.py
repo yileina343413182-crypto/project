@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Synchronous ORM persistence for Agent sessions, tasks, and preferences."""
+"""后台 Agent 使用的同步 ORM 持久化层。
+
+它与 ``async_memory`` 访问相同业务表，但适用于线程池中的同步工作流；
+不要把一个 SQLAlchemy Session 跨请求或跨线程传入这里。
+"""
 
 from __future__ import annotations
 
@@ -17,6 +21,7 @@ from backend.db.session import get_sync_engine
 
 
 def _date_value(value):
+    """把日期转换为可写入 JSON 响应的字符串。"""
     if isinstance(value, datetime):
         return value.strftime("%Y-%m-%d %H:%M:%S")
     if isinstance(value, date):
@@ -25,6 +30,7 @@ def _date_value(value):
 
 
 def _json_value(value, default):
+    """兼容原生 JSON 值和旧数据库中的 JSON 字符串。"""
     if value is None:
         return default
     if isinstance(value, str):
@@ -36,6 +42,7 @@ def _json_value(value, default):
 
 
 def init_agent_tables(db_path=None):
+    """以 checkfirst 模式补建 Agent 相关表，不修改已有数据。"""
     engine = get_sync_engine(db_path=db_path) if db_path else get_sync_engine()
     User.metadata.create_all(
         engine,
@@ -50,7 +57,10 @@ def init_agent_tables(db_path=None):
     )
 
 
+# ===== 会话与消息 =====
+
 def create_agent_session(user_id: int, agent_type: str, title: str) -> int:
+    """创建会话并返回自增 ID。"""
     with orm_session() as session:
         record = AgentSession(
             user_id=user_id,
@@ -77,6 +87,7 @@ def save_agent_message(
     content: str,
     metadata: dict | None = None,
 ) -> int:
+    """保存消息和结构化元数据，同时刷新会话更新时间。"""
     with orm_session() as session:
         record = AgentMessage(
             session_id=session_id,
@@ -115,6 +126,7 @@ def list_agent_sessions(user_id: int) -> list[dict[str, Any]]:
 
 
 def get_agent_session(user_id: int, session_id: int) -> dict | None:
+    """读取会话详情及完整消息序列，并校验会话归属。"""
     with orm_session() as session:
         record = session.scalar(
             select(AgentSession).where(
@@ -160,12 +172,15 @@ def delete_agent_session(user_id: int, session_id: int) -> int:
         return result.rowcount
 
 
+# ===== 后台任务状态机 =====
+
 def create_agent_task(
     user_id: int,
     session_id: int,
     agent_type: str,
     input_data: dict | None = None,
 ) -> int:
+    """创建 queued 任务，真正执行由 task_queue 负责。"""
     with orm_session() as session:
         task = AgentTask(
             user_id=user_id,
@@ -240,6 +255,7 @@ def get_running_task_for_session(user_id: int, session_id: int) -> dict | None:
 
 
 def update_agent_task(task_id: int, **fields) -> None:
+    """只更新调用方显式提供的任务字段。"""
     allowed = {"status", "result", "error", "progress", "current_step", "started_at", "finished_at"}
     values = {key: value for key, value in fields.items() if key in allowed}
     if not values:
@@ -263,6 +279,7 @@ def mark_task_running(task_id: int, current_step: str = "running") -> None:
 
 
 def mark_task_succeeded(task_id: int, result: dict, current_step: str = "completed") -> None:
+    """原子写入结果并将任务推进到 succeeded 终态。"""
     now = datetime.now()
     with orm_session() as session:
         task = session.get(AgentTask, task_id)
@@ -278,6 +295,7 @@ def mark_task_succeeded(task_id: int, result: dict, current_step: str = "complet
 
 
 def mark_task_failed(task_id: int, error: str, result: dict | None = None) -> None:
+    """记录截断后的异常信息并将任务推进到 failed 终态。"""
     now = datetime.now()
     with orm_session() as session:
         task = session.get(AgentTask, task_id)
@@ -292,7 +310,10 @@ def mark_task_failed(task_id: int, error: str, result: dict | None = None) -> No
         task.updated_at = now
 
 
+# ===== 用户长期偏好 =====
+
 def _ensure_preferences(session, user_id: int) -> None:
+    """按数据库方言执行幂等 upsert，保证每个用户只有一条偏好记录。"""
     values = {
         "user_id": user_id,
         "likes": [],
@@ -327,6 +348,7 @@ def get_user_preferences(user_id: int) -> dict[str, Any]:
 
 
 def update_user_preferences(user_id: int, updates: dict[str, Any]) -> dict[str, Any]:
+    """只合并白名单偏好字段，去重后返回最新完整偏好。"""
     allowed = ("likes", "dislikes", "preferred_moods", "preferred_genres", "feedback")
     with orm_session() as session:
         _ensure_preferences(session, user_id)

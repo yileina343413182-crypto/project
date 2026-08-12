@@ -21,14 +21,14 @@ router = APIRouter()
 
 @router.get("/api/topics/{anime_id}")
 async def topics(anime_id: int, session: AsyncSession = Depends(get_async_session)):
-    """获取LDA主题列表"""
+    """获取 LDA 主题及关键词列表。"""
     data = await get_topics(session, anime_id)
     return ok(data)
 
 
 @router.get("/api/wordcloud/{anime_id}")
 async def wordcloud(anime_id: int, session: AsyncSession = Depends(get_async_session)):
-    """获取词云数据"""
+    """异步读取评论，再在线程池中完成同步分词统计。"""
     contents = await get_wordcloud_contents(session, anime_id)
     data = await run_in_threadpool(_wordcloud_from_contents, contents, 100)
     return ok(data)

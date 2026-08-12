@@ -39,6 +39,7 @@ os.environ["RECOMMEND_CHECKPOINT_DB"] = _checkpoint_file.name
 for _name in (
     "LLM_API_KEY",
     "EMBEDDING_API_KEY",
+    "RERANK_API_KEY",
     "DASHSCOPE_API_KEY",
     "QWEN_API_KEY",
     "OPENAI_API_KEY",
@@ -57,6 +58,7 @@ _config.DATABASE_URL = _sync_url
 _config.ASYNC_DATABASE_URL = _async_url
 _config.DATABASE_IS_MYSQL = False
 _config.RECOMMEND_CHECKPOINT_DB = _checkpoint_file.name
+_config.RERANK_API_KEY = ""
 _db_session.DATABASE_URL = _sync_url
 _db_session.ASYNC_DATABASE_URL = _async_url
 if "backend.agents.recommend_graph" in sys.modules:

@@ -1,14 +1,17 @@
 # 面向动漫评论的情感分析与舆情监控系统
 
-> 基于 TextCNN / BERT 的三分类情感分析 + LDA 主题建模 + LLM 智能推荐 + Vue 3 可视化看板
+> 基于 TextCNN / BERT 的三分类情感分析 + LDA 主题建模 + LangGraph Agent + 混合 RAG + Vue 3 可视化看板
 >
-> 毕业设计项目（2026届）· Python 3.12 + FastAPI 0.139 + Vue 3 + SQLite
+> 毕业设计项目（2026届）· Python 3.12 + FastAPI 0.139 + Vue 3 + MySQL 8 / SQLite 兼容
 
 > [!IMPORTANT]
 > 当前推荐 Agent 2.0 已迁移为 LangGraph `StateGraph`。运行时 Prompt 由
 > `backend/prompts/registry.py` 加载不可变版本，不再读取
 > `backend/prompts/templates/*.yaml` 形式的旧平铺模板。Prompt 的版本、模板哈希和
 > 安全诊断会随 Agent 任务写入 `prompt_trace`。
+>
+> 当前业务持久化已统一到 SQLAlchemy 2.0 的 16 张 ORM 表。生产/本机运行优先
+> 使用 MySQL；SQLite 保留为迁移源、测试隔离数据库和未配置 MySQL 时的兼容后端。
 
 ---
 
@@ -50,32 +53,32 @@
 
 ## 2. 系统整体架构
 
-系统采用**前后端分离**架构，分为六个主要层次：
+系统采用**前后端分离**架构，主要层次如下：
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                    前端层（Vue 3 + ECharts）                  │
-│  登录/注册  →  动漫列表  →  可视化看板  →  AI 推荐对话        │
+│ 登录/注册 → 动漫列表/看板 → Agent 中心 → RAG 评测              │
 └─────────────────────────┬───────────────────────────────────┘
                           │ HTTP REST API (JSON)
 ┌─────────────────────────▼───────────────────────────────────┐
 │               后端层（FastAPI + Uvicorn ASGI）                │
-│  auth / data / sentiment / topic / recommend / history       │
+│ auth / data / sentiment / topic / recommend / history / agent / rag │
 └──────┬──────────────┬──────────────┬──────────────┬─────────┘
        │              │              │              │
 ┌──────▼──────┐ ┌─────▼──────┐ ┌────▼────┐ ┌──────▼──────────┐
-│  情感分析   │ │  主题挖掘  │ │  LLM   │ │   Bangumi API   │
-│ TextCNN/BERT│ │  gensim LDA│ │ 智谱/通义│ │  bgm.tv 评分    │
+│  情感分析   │ │  主题挖掘  │ │ Agent  │ │   Bangumi API   │
+│ TextCNN/BERT│ │  gensim LDA│ │LangGraph│ │  bgm.tv 评分    │
 └─────────────┘ └────────────┘ └─────────┘ └─────────────────┘
                           │
 ┌─────────────────────────▼───────────────────────────────────┐
-│                  数据层（SQLite）                              │
-│  anime / comments / topics / users / chat_history            │
+│       数据层（SQLAlchemy；MySQL 优先 / SQLite 兼容）           │
+│ 核心业务 5 表 + Agent 4 表 + RAG/评估 7 表                    │
 └─────────────────────────┬───────────────────────────────────┘
                           │ 离线流水线
 ┌─────────────────────────▼───────────────────────────────────┐
 │               数据采集与处理层（离线）                          │
-│  爬虫(B站/Bangumi/豆瓣) → 清洗 → 自动标注 → 模型训练 → 批量预测│
+│ 爬虫 → 清洗 → 自动标注 → 模型训练/预测 → LDA → RAG 索引       │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -94,11 +97,13 @@
 | **数据采集** | B 站评论/弹幕爬取，支持搜索+按季索引；Bangumi 吐槽箱批量采集（Top100）；豆瓣短评采集 | requests + BeautifulSoup + B站公开 API |
 | **数据清洗** | HTML 标签净化、表情符号过滤、URL 去除、纯数字/纯符号过滤、短评过滤（<5字）、去重、jieba 分词、停用词去除 | jieba + pandas + re |
 | **自动标注** | Bangumi 按星级标注（7-10分→正面，5-6分→中性，1-4分→负面）；B 站按 SnowNLP 情感打分阈值标注 | snownlp |
-| **情感分析** | TextCNN 三分类（正面/中性/负面），准确率约 60%；BERT 微调三分类，准确率约 63%；支持实时单条预测 | PyTorch + HuggingFace Transformers |
+| **情感分析** | TextCNN 三分类（准确率 59.63%）；BERT 微调三分类（准确率 67.40%）；支持实时单条预测 | PyTorch + HuggingFace Transformers |
 | **主题挖掘** | LDA 主题建模（默认 8 个主题），支持困惑度/一致性自动调参；TF-IDF / TextRank 关键词提取 | gensim |
 | **可视化看板** | 情感分布饼图、逐条情感趋势折线图、评论词云、LDA 主题卡片、评论列表（分页+情感过滤） | Vue 3 + ECharts 5 + echarts-wordcloud |
 | **用户系统** | 注册/登录、JWT Token 认证、bcrypt 密码哈希、聊天历史持久化 | PyJWT + bcrypt |
-| **AI 推荐** | LLM 意图识别（提取用户想看的动漫名/类型）→ 数据库模糊匹配 → Bangumi 评分拉取 → 多维情感统计 → LLM 生成推荐理由；LLM 不可用时自动降级为本地字符串模糊匹配 | OpenAI 兼容格式（智谱 GLM-4-Flash / 通义 Qwen-turbo） |
+| **Agent 中心** | 舆情诊断、多轮偏好推荐、会话/任务持久化、执行步骤和证据追踪 | LangGraph + LangChain + Pydantic |
+| **混合 RAG** | Chroma 向量召回与数据库关键词召回并行执行，RRF 融合后可选百炼 Rerank；索引不可用时降级到实时业务表 | Chroma + SQLAlchemy + qwen3-rerank |
+| **AI 推荐** | 保留传统单轮推荐；Agent 2.0 通过偏好问卷、候选池、受限只读工具和结构化校验生成可追溯推荐 | OpenAI 兼容接口（Qwen / OpenAI / 智谱） |
 | **REST API** | 统一 JSON 格式 `{"code":200,"msg":"...","data":{...}}`，完整的错误码体系 | FastAPI APIRouter |
 
 ---
@@ -109,7 +114,7 @@
 
 | 依赖 | 版本 | 用途 |
 |------|------|------|
-| Python | 3.10+ (推荐 3.12) | 后端运行时 |
+| Python | 3.12 | 后端运行时与依赖基线 |
 | FastAPI | 0.139.0 | Web 框架，应用工厂与 APIRouter |
 | Uvicorn | 0.51.0 | ASGI 服务（首轮固定单 worker） |
 | PyJWT | 2.12.1 | HS256 JWT Token 认证 |
@@ -120,10 +125,15 @@
 | jieba | 0.42.1 | 中文分词 |
 | snownlp | 0.12.3 | 自动情感标注 |
 | scikit-learn | 1.5.2 | 数据集划分、评估指标 |
-| PyTorch | 2.1.0 | TextCNN / BERT 训练与推理 |
-| transformers | 4.44.0 | bert-base-chinese 预训练模型 |
-| gensim | 4.3.3 | LDA 主题建模 |
-| SQLite | 内置 | 数据持久化 |
+| PyTorch | 2.11.0 | TextCNN / BERT 训练与推理 |
+| transformers | 4.46.3 | bert-base-chinese 预训练模型 |
+| gensim | 4.4.0 | LDA 主题建模 |
+| SQLAlchemy | 2.0.51 | 16 表统一 ORM、同步/异步事务边界 |
+| MySQL | 8.0+ | 默认业务数据库（PyMySQL + aiomysql） |
+| SQLite | 内置 | 迁移源、测试隔离与兼容回退 |
+| Alembic | 1.18.5 | MySQL Schema 迁移 |
+| LangGraph | 1.0.10 | 推荐 Agent 状态图与 Checkpoint |
+| Chroma | 0.5.23 | 可重建向量索引 |
 
 ### 4.2 前端
 
@@ -186,12 +196,12 @@
     ↓ 去重（基于评论内容）
     ↓ jieba 中文分词
     ↓ 停用词过滤（data/stopwords.txt，约 1000+ 条）
-清洗后 CSV (data/processed/) + 写入 SQLite 数据库
+清洗后 CSV (`data/processed/`) + 通过 SQLAlchemy 写入当前业务数据库
 ```
 
 ### 数据库写入
 
-清洗后同时将数据写入 SQLite 的 `anime` 表（若动漫不存在则自动创建）和 `comments` 表，形成结构化存储，供后续模型预测和前端查询使用。
+清洗后同时将数据写入当前配置数据库的 `anime` 表（若动漫不存在则自动创建）和 `comments` 表，形成结构化存储，供后续模型预测和前端查询使用。生产配置使用 MySQL；测试或显式传入 `--db_path` 时可使用 SQLite。
 
 ---
 
@@ -311,7 +321,7 @@
 
 ### 10.1 应用架构（`backend/app.py`）
 
-采用 FastAPI **应用工厂模式**（`create_app()`），通过 `APIRouter` 分模块注册同步路由，统一配置 CORS、JWT 与兼容错误处理。SQLite、Agent/RAG 线程池和 LangGraph Checkpointer 仍保持原有同步边界，首轮部署固定单 Uvicorn worker。
+采用 FastAPI **应用工厂模式**（`create_app()`），通过 8 个 `APIRouter` 注册接口并统一配置 CORS、JWT、生命周期和错误响应。请求侧数据库访问使用异步 `AsyncSession`；Agent、爬虫、训练和 RAG 索引使用同步 Session。业务数据库优先使用 MySQL，LangGraph Checkpointer 单独保存在 SQLite 文件中，首轮部署固定单 Uvicorn worker。
 
 ### 10.2 API 端点一览
 
@@ -327,7 +337,7 @@
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/anime/list` | 获取所有动漫列表（含评论数、情感统计） |
+| GET | `/api/anime/list` | 获取所有动漫列表及评论数 |
 | GET | `/api/comments/<anime_id>` | 分页查询评论，支持 `sentiment/page/size` 过滤 |
 
 #### 情感分析（`/api/sentiment`）
@@ -356,13 +366,25 @@
 | GET | `/api/agent/tasks/<task_id>` | 查询异步任务状态与结果 |
 | POST | `/api/agent/opinion/analyze` | 启动舆情诊断 Agent |
 
+#### RAG 与 PromptOps（`/api/rag`，均需 JWT）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/api/rag/index/rebuild` | 创建全量索引后台任务 |
+| POST | `/api/rag/index/anime/<anime_id>` | 为指定动漫更新索引 |
+| GET | `/api/rag/index/jobs/<job_id>` | 查询索引任务进度 |
+| GET | `/api/rag/index/status` | 查询活动集合、文档、Embedding 与 Rerank 状态 |
+| POST | `/api/rag/search` | 调试混合检索和证据链 |
+| POST | `/api/rag/eval/run` | 执行内置检索冒烟评估 |
+| GET | `/api/rag/eval/runs[/<run_id>]` | 查询评估历史或详情 |
+
 #### 历史记录（`/api/history`，均需 JWT）
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | POST | `/api/history/chat` | 保存一条聊天消息 |
 | GET | `/api/history/chat` | 分页获取聊天历史 |
-| DELETE | `/api/history/chat` | 清空当前用户聊天历史 |
+| DELETE | `/api/history/chat/<msg_id>` | 删除当前用户的指定历史消息 |
 
 ### 10.3 统一响应格式
 
@@ -388,8 +410,12 @@
 /login          → 登录页（未登录强制跳转）
 /register       → 注册页
 /               → 首页（动漫列表 + AI 推荐对话）  [需登录]
-/dashboard/:id  → 数据看板（指定动漫的完整分析） [需登录]
+/dashboard/:animeId → 数据看板（指定动漫的完整分析） [需登录]
 /history        → 聊天历史页                    [需登录]
+/agent          → 智能体中心                    [需登录]
+/agent/opinion  → 舆情诊断 Agent                [需登录]
+/agent/recommendation → 推荐 Agent 2.0           [需登录]
+/agent/evaluation → RAG 评测看板                 [需登录]
 ```
 
 路由守卫：通过 `localStorage` 中的 JWT Token 判断登录状态，未登录自动重定向至 `/login`。
@@ -421,6 +447,13 @@ AI 推荐响应返回一张结构化"推荐卡片"，展示：
 - Bangumi 综合评分（实时调用 bgm.tv API）
 - 情感多维度分析（作画/剧情/声优正负面占比）
 - LLM 生成的个性化推荐语
+
+### 11.5 Agent 中心与 RAG 看板
+
+- `AgentCenter.vue`：舆情、推荐和 RAG 评测入口。
+- `OpinionAgentPage.vue`：轮询后台任务并展示舆情报告、执行步骤、Prompt Trace 和证据链。
+- `RecommendationAgentPage.vue`：多轮偏好问卷、偏好记忆、结构化推荐和本地降级状态。
+- `RagEvaluationPage.vue`：索引任务、检索调试、证据链和内置评估结果。
 
 ---
 
@@ -468,7 +501,7 @@ flowchart LR
 - `RECOMMEND_TOOLS` 仅包含当前候选池内的只读查询工具，由
   `bind_tools + ToolNode` 执行。
 - `step_count`、`retry_count`、工具轮次和 `recursion_limit` 共同限制循环。
-- SQLite Checkpointer 保存节点状态；节点异常时从最近检查点恢复。
+- 独立 SQLite Checkpointer 保存图节点状态；它不属于 MySQL 的 16 张业务表。
 - 高风险 Prompt 注入输入不触发工具规划，也不能写入持久化偏好。
 - LLM 产生的偏好只作为 `suggested` 返回；只有确定性解析结果可以写入
   `applied` 偏好。
@@ -496,64 +529,49 @@ flowchart LR
 Prompt 版本管理细节见
 [`backend/prompts/README.md`](backend/prompts/README.md)。
 
+### 13.3 混合 RAG 与 Rerank
+
+`backend/rag/retriever.py` 在活动集合的 Embedding 元数据匹配时并行执行两路召回：
+
+1. Chroma 向量相似度召回。
+2. `rag_documents` 数据库关键词召回。
+3. 使用 RRF（Reciprocal Rank Fusion，默认 `k=60`）按 `doc_id` 去重融合。
+4. 配置百炼 Rerank 时，使用 `qwen3-rerank` 对融合候选精排。
+5. 向量或 Rerank 不可用时保留关键词/RRF 结果；索引整体不可用时继续从
+   `comments`、`topics` 和情感汇总实时构造证据。
+
+检索响应会返回 `mode`、`retrieval_counts`、`rrf_score`、`rerank_score`、
+`vector_rank` 和 `keyword_rank` 等诊断字段。`rag_documents` 是关系数据库中的
+文档副本，不能替代 Chroma 实际向量计数；索引任务只有在向量数与文档数一致、
+抽样查询成功后才激活新集合。
+
 ---
 
 ## 14. 数据库设计
 
-数据库文件：`data/anime_sentiment.db`（SQLite）
+数据库访问统一通过 `backend/db/models.py` 和 `backend/db/session.py`。默认从
+`DATABASE_URL` 或 `MYSQL_*` 环境变量构造 MySQL 连接；未配置 MySQL 时才使用
+`data/anime_sentiment.db` 作为 SQLite 兼容后端。
 
-### 主要数据表
+ORM 共包含 16 张业务表：
 
-#### `anime`（动漫信息表）
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| id | INTEGER PK | 自增主键 |
-| name | TEXT | 动漫名称 |
-| platform | TEXT | 数据来源平台（bilibili/bangumi/douban） |
-| comment_count | INTEGER | 评论总数 |
-| bangumi_id | INTEGER | Bangumi 条目 ID（可选） |
-| created_at | TEXT | 入库时间 |
+| 分组 | 数据表 | 主要用途 |
+|------|--------|----------|
+| 核心业务 | `users`、`anime`、`comments`、`topics`、`chat_history` | 用户、动漫、评论情感、LDA 主题和传统聊天历史 |
+| Agent | `agent_sessions`、`agent_messages`、`agent_tasks`、`user_preferences` | Agent 会话、多轮消息、后台任务和长期偏好 |
+| RAG | `rag_index_jobs`、`rag_documents`、`rag_active_collections`、`rag_collection_metadata` | 索引任务、可检索文档、活动集合和 Embedding 元数据 |
+| RAG 评估 | `rag_eval_cases`、`rag_eval_runs`、`rag_eval_items` | 评估用例、运行记录、指标和证据 |
 
-#### `comments`（评论数据表）
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| id | INTEGER PK | 自增主键 |
-| anime_id | INTEGER FK | 关联动漫 |
-| content | TEXT | 评论原文 |
-| tokens | TEXT | jieba 分词结果（空格分隔） |
-| sentiment | TEXT | 情感标签（positive/neutral/negative） |
-| sentiment_score | REAL | 情感置信度分值 |
-| rate | REAL | 原始评分（Bangumi 专属）|
-| platform | TEXT | 评论来源平台 |
-| likes | INTEGER | 点赞数（B 站专属）|
-| created_at | TEXT | 评论发布时间 |
+关键兼容设计：
 
-#### `topics`（LDA 主题表）
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| id | INTEGER PK | 自增主键 |
-| anime_id | INTEGER FK | 关联动漫 |
-| topic_id | INTEGER | 主题编号（0-N） |
-| keywords | TEXT | 关键词列表（JSON 数组） |
-| weight | REAL | 主题权重 |
+- JSON 字段在 MySQL 使用原生 JSON，在 SQLite 通过 SQLAlchemy 自动序列化。
+- `comments.sentiment_score` 和 `topics.weight` 在 MySQL 使用 `DOUBLE`，避免从 SQLite `REAL` 迁移时损失精度。
+- `PortableDateTime` 在 MySQL 使用原生 `DATETIME`，同时兼容旧 SQLite 文本时间。
+- 外键统一使用级联或置空策略，并为评论查询、任务状态和 RAG 集合建立索引。
+- LangGraph Checkpoint 使用 `data/langgraph_checkpoints.db`，不属于上述 16 张业务表。
 
-#### `users`（用户表）
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| id | INTEGER PK | 自增主键 |
-| username | TEXT UNIQUE | 用户名 |
-| password_hash | TEXT | bcrypt 哈希密码 |
-| created_at | TEXT | 注册时间 |
-
-#### `chat_history`（聊天历史表）
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| id | INTEGER PK | 自增主键 |
-| user_id | INTEGER FK | 关联用户（级联删除） |
-| role | TEXT | 消息角色（user/assistant） |
-| content | TEXT | 消息内容 |
-| anime_card | TEXT | 推荐卡片数据（JSON，仅 assistant 消息有） |
-| created_at | TEXT | 消息时间 |
+MySQL Schema 由 Alembic 管理；SQLite → MySQL 的一次性迁移和全量校验脚本位于
+`scripts/migrate_sqlite_to_mysql.py` 与 `scripts/verify_mysql_migration.py`。
 
 ---
 
@@ -569,34 +587,36 @@ Step 1: 数据采集
 
 Step 2: 数据清洗入库
     python crawler/cleaner.py --input_dir bangumi_top100 --platform bangumi
-    # 输出: data/processed/ + 写入 SQLite anime/comments 表
+    # 输出: data/processed/ + 写入当前配置数据库的 anime/comments 表
 
 Step 3: 自动标注
     python data/train/auto_label.py
     # 输出: data/train/sentiment_train.csv（约 1-3 万条，三类平衡）
 
 Step 4: 模型训练
-    python -m models.trainer --model textcnn --epochs 10
-    python -m models.trainer --model bert --epochs 3 --lr 2e-5
+    python -m models.trainer --model textcnn --data_path data/train/sentiment_train.csv --epochs 10
+    python -m models.trainer --model bert --data_path data/train/sentiment_train.csv --epochs 3 --lr 2e-5
     # 输出: models/saved/textcnn/ + models/saved/bert/
 
 Step 5: 批量情感预测
     python batch_predict.py --model bert --overwrite
-    # 更新 SQLite comments.sentiment 字段
+    # 更新当前配置数据库的 comments.sentiment_label / sentiment_score 字段
 
 Step 6: 主题挖掘
     python -m topic.lda_model --anime_id 1 --num_topics 8
-    # 写入 SQLite topics 表
+    # 写入当前配置数据库的 topics 表
 ```
 
-### 端到端一键执行
+### 已有数据的处理入口
 
 ```bash
-# 单部动漫完整流水线（爬取 → 清洗 → 预测 → 主题）
-python prepare_data.py --anime "进击的巨人" --platform bilibili --max_pages 30 --model bert
+# 对已有动漫执行情感预测和主题建模
+python prepare_data.py --anime_id 1 --skip-crawl --model bert
 
-# 演示模式（无需爬虫，直接注入演示数据）
-python generate_demo_data.py
+# 重新计算全部动漫主题
+python prepare_data.py --topics-only
+
+# 数据准备完成后启动后端
 python run.py
 ```
 
@@ -608,18 +628,21 @@ python run.py
 project/
 ├── run.py                          # 项目启动入口（后端服务器）
 ├── run_server.py                   # 备用启动脚本
-├── prepare_data.py                 # 完整数据处理流水线入口
+├── prepare_data.py                 # 已有数据预测/主题与采集流程 CLI
 ├── batch_predict.py                # 批量情感预测脚本
-├── generate_demo_data.py           # 演示数据生成脚本
 ├── verify_majo.py                  # 单动漫端到端验证脚本
 ├── test_api.py                     # API 接口测试脚本
 ├── requirements.txt                # Python 依赖列表
+├── alembic/                        # MySQL Schema 迁移（当前 revision 20260801_02）
+├── scripts/                        # SQLite→MySQL 迁移、全量核验和运行探测
+├── tests/                          # API、ORM、Agent、Prompt 安全和 RAG 回归测试
 │
 ├── backend/                        # FastAPI 后端
 │   ├── app.py                      # 应用工厂，注册 APIRouter、lifespan 与 CORS
 │   ├── config.py                   # 全局配置（DB路径、端口、LLM Key、JWT密钥）
 │   ├── security.py                 # HS256 JWT 签发与认证依赖
-│   ├── database.py                 # 所有 CRUD 函数（动漫/评论/用户/聊天历史/词云/主题）
+│   ├── database.py                 # 同步业务查询兼容入口
+│   ├── db/                         # 16 表 ORM、同步/异步 Session 与 Repository
 │   ├── api/
 │   │   ├── auth.py                 # POST /register /login, GET /me（JWT 保护）
 │   │   ├── data.py                 # GET /anime/list, GET /comments/<id>（分页+情感过滤）
@@ -637,7 +660,8 @@ project/
 │   ├── prompts/
 │   │   ├── registry.py             # 不可变 Prompt 版本、哈希和原子切换
 │   │   └── templates/              # active_versions、manifest、版本化 YAML
-│   ├── rag/                        # 索引、向量库、检索、存储和评测
+│   ├── rag/                        # 索引、向量库、混合检索、RRF、Rerank、存储和评测
+│   │   └── reranker.py             # 百炼 qwen3-rerank 客户端与失败回退
 │   └── services/
 │       ├── llm.py                  # LLM 调用封装（智谱/通义，OpenAI 兼容，自动降级）
 │       └── bangumi.py              # Bangumi API 封装（搜索、评分、内存缓存）
@@ -646,7 +670,7 @@ project/
 │   ├── bilibili_crawler.py         # B站爬虫（BiliSession + cookie + HMAC 签名）
 │   ├── bangumi_crawler.py          # Bangumi 吐槽箱爬虫
 │   ├── douban_crawler.py           # 豆瓣短评爬虫
-│   ├── cleaner.py                  # 清洗 + jieba 分词 + SQLite 写入
+│   ├── cleaner.py                  # 清洗 + jieba 分词 + SQLAlchemy 写入
 │   ├── crawl_top100.py             # Bangumi Top100 批量采集
 │   ├── crawl_bili_top100.py        # B站 Top100 批量采集
 │   └── bilibili_top100.py          # B站追番排行榜工具
@@ -676,7 +700,9 @@ project/
 │   ├── train/
 │   │   ├── auto_label.py           # 自动标注脚本
 │   │   └── sentiment_train.csv     # 训练数据集（text, label）
-│   └── anime_sentiment.db          # SQLite 数据库（运行后生成）
+│   ├── anime_sentiment.db          # SQLite 迁移源/兼容数据库
+│   ├── langgraph_checkpoints.db    # 推荐图独立 Checkpoint
+│   └── chroma/                     # 可重建 Chroma 向量数据
 │
 └── frontend/                       # Vue 3 前端
     ├── index.html
@@ -693,7 +719,11 @@ project/
         │   ├── Register.vue         # 注册页
         │   ├── Home.vue             # 首页（动漫列表 + AI 推荐对话）
         │   ├── Dashboard.vue        # 数据看板（情感/词云/主题/评论）
-        │   └── HistoryPage.vue      # 聊天历史页
+        │   ├── HistoryPage.vue      # 聊天历史页
+        │   ├── AgentCenter.vue      # 智能体中心
+        │   ├── OpinionAgentPage.vue # 舆情诊断 Agent
+        │   ├── RecommendationAgentPage.vue # 推荐 Agent 2.0
+        │   └── RagEvaluationPage.vue # RAG 评测看板
         └── components/
             ├── SentimentPie.vue     # 情感分布饼图
             ├── SentimentTrend.vue   # 情感趋势折线图
@@ -701,7 +731,8 @@ project/
             ├── TopicCards.vue       # LDA 主题卡片
             ├── CommentList.vue      # 评论列表（分页+过滤）
             ├── RecommendChat.vue    # AI 推荐对话框
-            └── RecommendCard.vue    # 推荐结果卡片
+            ├── RecommendCard.vue    # 推荐结果卡片
+            └── agent/               # Agent 步骤、偏好、报告、证据和 Prompt Trace 组件
 ```
 
 ---
@@ -712,6 +743,7 @@ project/
 
 - Python 3.12
 - Node.js 18+
+- MySQL 8.0+（默认业务数据库；也可显式使用 SQLite 兼容模式）
 
 ### 1. 克隆并安装依赖
 
@@ -736,7 +768,30 @@ PowerShell 中运行 `.venv\Scripts\python.exe --version`，并检查
 
 > **GPU 加速**：如需 GPU 版 PyTorch，参考 https://pytorch.org/get-started/locally/ 替换 `torch` 安装命令。
 
-### 2. 配置 LLM 与 Embedding
+### 2. 配置数据库
+
+本机开发可创建不纳入 Git 的 `.env.mysql.local`：
+
+```dotenv
+MYSQL_HOST=127.0.0.1
+MYSQL_PORT=3306
+MYSQL_DATABASE=anime_sentiment
+MYSQL_USER=your-user
+MYSQL_PASSWORD=your-password
+```
+
+也可以直接设置 `DATABASE_URL` 与 `ASYNC_DATABASE_URL`。全新 MySQL Schema
+先执行 Alembic；只有从旧 SQLite 首次迁移且目标业务表为空时，才运行数据复制：
+
+```powershell
+alembic upgrade head
+python scripts/migrate_sqlite_to_mysql.py
+python scripts/verify_mysql_migration.py
+```
+
+迁移脚本不读取或修改独立的 LangGraph Checkpoint SQLite。
+
+### 3. 配置 LLM、Embedding 与 Rerank
 
 不要在代码中写入密钥，使用环境变量：
 
@@ -745,12 +800,16 @@ $env:LLM_PROVIDER="qwen"
 $env:QWEN_API_KEY="your-key"
 $env:EMBEDDING_PROVIDER="qwen"
 $env:EMBEDDING_API_KEY="your-key"
+$env:RERANK_PROVIDER="qwen"
+$env:RERANK_WORKSPACE_ID="your-workspace-id"
+$env:RERANK_MODEL="qwen3-rerank"
 ```
 
-未配置 LLM 或 Embedding Key 时，推荐与 RAG 分别降级为本地推荐和 SQLite
-关键词检索。
+未配置 LLM 或 Embedding Key 时，推荐与 RAG 分别降级为本地推荐和数据库
+关键词检索。未配置百炼 Rerank 或调用失败时，混合检索保留 RRF 融合顺序。
+启用百炼 Rerank 后，融合候选文本会发送到对应百炼业务空间进行精排。
 
-### 3. 安装前端依赖
+### 4. 安装前端依赖
 
 ```bash
 cd frontend
@@ -758,13 +817,10 @@ npm install
 cd ..
 ```
 
-### 4. 启动（演示模式）
+### 5. 启动
 
 ```bash
-# 生成演示数据（进击的巨人 / 鬼灭之刃 / 间谍过家家，各 500 条评论）
-python generate_demo_data.py
-
-# 启动后端（5000 端口）
+# 确保 MySQL 已启动且数据库配置有效，然后启动后端（5000 端口）
 python run.py
 ```
 
@@ -777,7 +833,7 @@ npm run dev
 
 浏览器访问：http://localhost:3000
 
-### 5. 重建 RAG 向量索引
+### 6. 重建 RAG 向量索引
 
 `data/chroma/` 是可重建运行数据，不纳入 Git。索引损坏、Embedding
 provider/model 变化或首次部署时执行：
@@ -790,7 +846,11 @@ python rebuild_rag_index.py
 `GET /api/rag/index/jobs/<job_id>` 检查任务状态。只有任务完成且 collection
 校验成功后才会切换 active collection。
 
-### 6. 自动化测试
+关系数据库中的 `rag_documents` 数量不等于 Chroma 的实际向量数量。首次部署、
+清理过 `data/chroma/` 或更换 Embedding 模型后，应重新构建并确认索引任务的
+`chroma_docs`、`verified` 和活动集合状态。
+
+### 7. 自动化测试
 
 ```powershell
 python -m unittest discover -s tests -p "test*_unittest.py"
@@ -843,46 +903,9 @@ python -m topic.lda_model --anime_id 1 --find_best --min_topics 3 --max_topics 1
 | 双模型并行 | TextCNN（快）+ BERT（准）均保留 | TextCNN 适合实时预测场景，BERT 适合离线批量处理 |
 | 训练数据标注 | 弱监督自动标注（星级/SnowNLP） | 人工标注成本高，弱监督方案可快速获取万级标注数据 |
 | LLM 接入方式 | OpenAI 兼容接口 + 自动降级 | 解耦 LLM 厂商依赖，网络不可用时系统仍正常运行 |
-| 数据库选型 | SQLite | 毕业设计场景无并发压力，SQLite 零配置、单文件便于迁移 |
+| 数据库选型 | MySQL 8 + SQLAlchemy，SQLite 兼容 | MySQL 承担当前业务运行；统一 ORM 同时保留旧库迁移、离线测试和轻量回退能力 |
 | 前端状态管理 | 无 Pinia/Vuex，组件内 ref/reactive | 应用规模适中，引入状态管理库会增加不必要复杂度 |
 | BERT 基座 | bert-base-chinese | 官方中文预训练模型，参数量适中（1.1亿），在动漫中文评论上微调效果良好 |
-├── frontend/                       # Vue 3 前端
-│   ├── src/
-│   │   ├── views/
-│   │   │   ├── Home.vue            # 主页：动漫列表、搜索框、用户栏、自定义滚动条、背景图
-│   │   │   ├── Dashboard.vue       # 详情页：情感图表 + 词云 + 主题卡片 + 评论列表 + AI推荐
-│   │   │   ├── Login.vue           # 登录页（JWT 登录）
-│   │   │   ├── Register.vue        # 注册页
-│   │   │   └── HistoryPage.vue     # 聊天历史页（JWT 保护路由）
-│   │   ├── components/
-│   │   │   ├── SentimentPie.vue    # 情感占比饼图（ECharts）
-│   │   │   ├── SentimentTrend.vue  # 情感时间趋势折线图（ECharts）
-│   │   │   ├── WordCloud.vue       # 词云组件（echarts-wordcloud）
-│   │   │   ├── TopicCards.vue      # LDA 主题卡片
-│   │   │   ├── CommentList.vue     # 评论列表（分页+情感过滤）
-│   │   │   ├── RecommendCard.vue   # AI 推荐结果卡片
-│   │   │   └── RecommendChat.vue   # AI 推荐聊天对话框
-│   │   ├── api/index.js            # Axios 封装（统一 baseURL + 响应拦截）
-│   │   ├── router/                 # vue-router 4（含路由守卫，未登录跳转 /login）
-│   │   ├── utils/                  # 工具函数（JWT 存取等）
-│   │   └── styles/global.css       # Neo-Tokyo 暗色主题
-│   └── vite.config.js              # Vite 5，/api → localhost:5000 代理
-│
-├── data/
-│   ├── anime_sentiment.db          # SQLite 主数据库（5张表，见下方）
-│   ├── stopwords.txt               # 中文停用词表（约2000词）
-│   ├── raw/                        # 爬虫原始 CSV
-│   ├── processed/                  # 清洗后 CSV
-│   └── train/                      # 模型训练数据集
-│
-├── run.py                          # 一键启动（建表+检查模型+Uvicorn）
-├── run_server.py                   # 单独启动 FastAPI（不做模型预热）
-├── prepare_data.py                 # 完整数据流水线 CLI
-├── batch_predict.py                # 批量情感预测（未标注评论补全）
-├── generate_demo_data.py           # 生成演示数据（无需爬虫）
-├── verify_majo.py                  # 单动漫端到端验证脚本（可改常量复用）
-└── requirements.txt
-```
 
 ---
 
@@ -899,7 +922,7 @@ python -m topic.lda_model --anime_id 1 --find_best --min_topics 3 --max_topics 1
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/api/health` | 健康检查 |
-| GET | `/api/anime/list` | 动漫列表（含评论数、情感分布概要） |
+| GET | `/api/anime/list` | 动漫列表（含评论数） |
 | GET | `/api/comments/<anime_id>` | 评论分页（`?page=1&size=20&sentiment=positive`） |
 | GET | `/api/wordcloud/<anime_id>` | 词频词云数据（Top 100 词） |
 
@@ -908,7 +931,7 @@ python -m topic.lda_model --anime_id 1 --find_best --min_topics 3 --max_topics 1
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/api/sentiment/stats/<anime_id>` | 三分类情感占比统计 |
-| GET | `/api/sentiment/trend/<anime_id>` | 按月情感趋势折线图数据 |
+| GET | `/api/sentiment/trend/<anime_id>` | 按日期聚合的情感趋势数据 |
 | GET | `/api/sentiment/scatter/<anime_id>` | 情感散点图（置信度分布，最多 600 条） |
 | POST | `/api/sentiment/predict` | 实时文本情感预测 `{"text":"..."}` |
 
@@ -935,74 +958,33 @@ python -m topic.lda_model --anime_id 1 --find_best --min_topics 3 --max_topics 1
 | GET | `/api/history/chat` | 分页获取当前用户历史（`?page=1&page_size=20`） |
 | DELETE | `/api/history/chat/<id>` | 删除指定历史条目 |
 
+### Agent 与 RAG（JWT 保护）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/api/agent/opinion/analyze` | 创建舆情诊断后台任务 |
+| POST | `/api/agent/recommend/start` | 创建推荐 Agent 2.0 会话与任务 |
+| POST | `/api/agent/recommend/message` | 向推荐会话追加消息 |
+| GET | `/api/agent/tasks/<task_id>` | 查询 Agent 任务状态与结果 |
+| GET/DELETE | `/api/agent/sessions[/<session_id>]` | 查询或删除当前用户的 Agent 会话 |
+| POST | `/api/rag/index/rebuild` | 重建全量 RAG 索引 |
+| GET | `/api/rag/index/status` | 查询关系文档、Embedding、Chroma 与 Rerank 状态 |
+| POST | `/api/rag/search` | 调试混合检索、RRF 和证据链 |
+| POST | `/api/rag/eval/run` | 运行内置 RAG 冒烟评估 |
+
 ---
 
-## 数据库结构
+## 数据库结构速览
 
-SQLite 文件：`data/anime_sentiment.db`，共 5 张表。
-
-```sql
--- 动漫信息
-CREATE TABLE anime (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    name        TEXT    NOT NULL,
-    platform    TEXT    NOT NULL,       -- bilibili / bangumi / douban / bilibili+bangumi 等
-    url         TEXT,
-    created_at  TEXT    DEFAULT (datetime('now','localtime'))
-);
-
--- 评论/弹幕数据（核心表）
-CREATE TABLE comments (
-    id               INTEGER PRIMARY KEY AUTOINCREMENT,
-    anime_id         INTEGER NOT NULL,
-    content          TEXT    NOT NULL,  -- 原始文本
-    clean_content    TEXT,              -- 清洗+分词后文本
-    publish_time     TEXT,              -- YYYY-MM-DD HH:MM:SS
-    likes            INTEGER DEFAULT 0,
-    platform         TEXT    NOT NULL,  -- bilibili / bangumi / douban
-    sentiment_label  TEXT,              -- positive / neutral / negative
-    sentiment_score  REAL,              -- 置信度 0~1
-    model_used       TEXT,              -- textcnn / bert
-    created_at       TEXT    DEFAULT (datetime('now','localtime'))
-);
-
--- LDA 主题
-CREATE TABLE topics (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    anime_id   INTEGER NOT NULL,
-    topic_id   INTEGER NOT NULL,
-    keywords   TEXT    NOT NULL,        -- JSON: [{"word":"剧情","weight":0.05}, ...]
-    weight     REAL,
-    created_at TEXT    DEFAULT (datetime('now','localtime'))
-);
-
--- 用户表
-CREATE TABLE users (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    username      TEXT    NOT NULL UNIQUE,
-    password_hash TEXT    NOT NULL,     -- bcrypt 哈希
-    created_at    TEXT    DEFAULT (datetime('now','localtime'))
-);
-
--- 聊天历史（与 AI 推荐的对话记录）
-CREATE TABLE chat_history (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id    INTEGER NOT NULL,
-    role       TEXT    NOT NULL,        -- user / ai
-    content    TEXT    NOT NULL,
-    anime_card TEXT,                    -- JSON，AI回复时附带的动漫卡片信息
-    created_at TEXT    DEFAULT (datetime('now','localtime'))
-);
-```
+当前 Schema 为 MySQL 8 上的 16 张 SQLAlchemy 业务表；SQLite 保留相同映射以
+支持迁移和测试。完整分组、兼容规则和迁移方式见[第 14 节](#14-数据库设计)，
+实际列定义以 `backend/db/models.py` 为准。
 
 ---
 
 ## 常用命令速查
 
 ```bash
-# 生成演示数据（3部动漫 × 500条）
-python generate_demo_data.py
-
 # 启动后端（FastAPI + Uvicorn + 自动建表）
 python run.py
 # 或单独启动（不做模型预热）
@@ -1016,6 +998,12 @@ python batch_predict.py --model bert --anime_id 1
 
 # 仅重新计算所有动漫的 LDA 主题
 python prepare_data.py --topics-only
+
+# 核验 SQLite → MySQL 的 16 表全量内容
+python scripts/verify_mysql_migration.py
+
+# 重建 RAG 索引
+python rebuild_rag_index.py
 
 # 前端开发模式
 cd frontend && npm run dev
@@ -1037,14 +1025,15 @@ python verify_majo.py --dry-run   # 仅测试数据库初始化
 | 前端框架 | Vue 3 (Composition API) + Vite 5 + Vue Router 4 |
 | 前端可视化 | ECharts 5 + echarts-wordcloud |
 | 后端框架 | Python 3.12 + FastAPI 0.139 + Uvicorn 0.51 + PyJWT |
-| 数据库 | SQLite 3（单文件，无需部署） |
+| 数据库 | MySQL 8 + SQLAlchemy 2.0（SQLite 迁移/测试兼容） |
 | NLP 基础 | jieba 分词 + 自定义停用词表（~2000词） |
 | 主题建模 | gensim LDA |
-| 深度学习 | PyTorch 2.1 + HuggingFace Transformers 4.44 |
+| 深度学习 | PyTorch 2.11 + HuggingFace Transformers 4.46.3 |
 | 情感模型 | TextCNN（自建）/ bert-base-chinese 微调 |
 | 爬虫 | requests + BeautifulSoup4 |
 | 安全 | bcrypt 密码哈希 + JWT 无状态认证 |
-| LLM 集成 | 智谱 GLM-4-Flash / 通义 Qwen-turbo（OpenAI 兼容接口，自动降级） |
+| Agent / RAG | LangGraph + Chroma + 数据库关键词检索 + RRF + qwen3-rerank |
+| LLM 集成 | Qwen qwen3-8b / OpenAI / 智谱 GLM-4-Flash（OpenAI 兼容接口，自动降级） |
 
 ---
 
@@ -1054,8 +1043,8 @@ python verify_majo.py --dry-run   # 仅测试数据库初始化
 
 | 模型 | 准确率 | 架构 | 特点 |
 |------|--------|------|------|
-| TextCNN | ~60% | Embedding → 多尺度 Conv(2,3,4) → MaxPool → Dropout → FC | 推理速度快，适合批量预测 |
-| BERT | ~63% | bert-base-chinese + 分类头微调 | 语义理解更强，适合实时预测 |
+| TextCNN | 59.63% | Embedding → 多尺度 Conv(2,3,4) → MaxPool → Dropout → FC | 推理速度快，适合批量预测 |
+| BERT | 67.40% | bert-base-chinese + 分类头微调 | 语义理解更强，适合实时预测 |
 
 模型权重存放于 `models/saved/`，训练集位于 `data/train/`，训练/评估报告见 `models/saved/reports/`。
 
@@ -1068,8 +1057,12 @@ python verify_majo.py --dry-run   # 仅测试数据库初始化
 | 登录 | `/login` | JWT 登录，登录后跳转主页 |
 | 注册 | `/register` | 用户名+密码注册，自动登录 |
 | 主页 | `/` | 动漫卡片列表、搜索过滤、系统统计概览（需登录） |
-| 详情看板 | `/dashboard/:id` | 情感饼图、趋势折线、词云、主题卡片、评论列表、AI 推荐对话（需登录） |
+| 详情看板 | `/dashboard/:animeId` | 情感饼图、趋势折线、词云、主题卡片、评论列表（需登录） |
 | 历史记录 | `/history` | 查看/删除与 AI 推荐的聊天历史（需登录） |
+| 智能体中心 | `/agent` | 舆情、推荐和 RAG 评测入口（需登录） |
+| 舆情诊断 | `/agent/opinion` | 结构化报告、执行步骤、Prompt Trace 和证据链（需登录） |
+| 推荐 Agent 2.0 | `/agent/recommendation` | 多轮偏好问卷和可追溯推荐（需登录） |
+| RAG 评测 | `/agent/evaluation` | 索引状态、检索调试和冒烟评估（需登录） |
 
 路由守卫：未登录用户访问受保护路由时自动跳转 `/login`。
 
@@ -1098,6 +1091,8 @@ python verify_majo.py --dry-run   # 仅测试数据库初始化
 - CORS 默认允许本机 3000 端口前端，可通过 `CORS_ORIGINS` 配置
 - JWT Token 过期时间：24小时（`JWT_ACCESS_TOKEN_EXPIRES = 86400`）
 - LLM 调用失败时自动降级为本地模糊匹配，不影响基础推荐功能
+- 业务数据库默认使用 MySQL；SQLite 仅作为显式兼容后端、迁移源和测试副本
+- `rag_documents` 是关系数据库中的可检索文档副本，Chroma 向量需要单独构建和验证
 
 ---
 

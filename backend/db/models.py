@@ -1,6 +1,7 @@
-"""Portable ORM mapping for the 16 business tables.
+"""16 张业务表的跨 MySQL/SQLite SQLAlchemy ORM 映射。
 
-The LangGraph checkpoint database is intentionally outside this metadata.
+LangGraph Checkpoint 使用独立数据库，不属于这份 ``Base.metadata``，因此
+业务表建表或迁移不会碰到工作流检查点。
 """
 
 from __future__ import annotations
@@ -45,7 +46,7 @@ PRECISE_FLOAT = Float().with_variant(DOUBLE(asdecimal=False), "mysql")
 
 
 class PortableDateTime(TypeDecorator):
-    """Keep legacy SQLite date strings while using real MySQL DATETIME."""
+    """MySQL 使用原生 DATETIME，SQLite 保持旧库兼容的文本时间格式。"""
 
     impl = DateTime
     cache_ok = True
@@ -83,8 +84,11 @@ PORTABLE_DATETIME = PortableDateTime()
 
 
 class Base(DeclarativeBase):
+    """所有业务 ORM 模型的声明式基类。"""
     metadata = MetaData(naming_convention=NAMING_CONVENTION)
 
+
+# ===== 核心业务：用户、动漫、评论、主题和聊天历史 =====
 
 class User(Base):
     __tablename__ = "users"
@@ -159,6 +163,8 @@ class ChatHistory(Base):
     created_at: Mapped[datetime] = mapped_column(PORTABLE_DATETIME, nullable=False, server_default=func.now())
 
 
+# ===== Agent：会话、消息、后台任务和长期偏好 =====
+
 class AgentSession(Base):
     __tablename__ = "agent_sessions"
     __table_args__ = (
@@ -226,6 +232,8 @@ class UserPreference(Base):
     feedback: Mapped[Any] = mapped_column(JSON, nullable=False, default=list)
     updated_at: Mapped[datetime] = mapped_column(PORTABLE_DATETIME, nullable=False, server_default=func.now())
 
+
+# ===== RAG：索引文档、活动集合、集合元数据和评估记录 =====
 
 class RagIndexJob(Base):
     __tablename__ = "rag_index_jobs"
@@ -329,4 +337,5 @@ class RagEvalItem(Base):
     created_at: Mapped[datetime] = mapped_column(PORTABLE_DATETIME, nullable=False, server_default=func.now())
 
 
+# 供迁移检查或诊断代码一次取得本元数据中的全部业务表名。
 BUSINESS_TABLES = tuple(Base.metadata.tables)

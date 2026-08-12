@@ -36,7 +36,7 @@ class PromptRegistryTest(unittest.TestCase):
             prompt.version,
             active_versions["recommendation"],
         )
-        self.assertEqual(prompt.version, "rag-v3-injection-guard")
+        self.assertEqual(prompt.version, "rag-v4-personalized-advisor")
         self.assertEqual(len(prompt.template_hash), 64)
 
     def test_historical_prompt_version_remains_addressable(self):
@@ -99,7 +99,7 @@ class PromptRegistryTest(unittest.TestCase):
                 "backend.prompts.registry.get_active_versions",
                 return_value={
                     **get_active_versions(),
-                    "recommendation": "rag-v3-injection-guard",
+                    "recommendation": "rag-v4-personalized-advisor",
                 },
             ),
             patch(

@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Fallback report generators used when LangChain or LLM calls fail."""
+"""LLM/LangChain 不可用时的确定性本地降级结果生成器。
+
+降级结果仍遵守与正常路径相同的 Pydantic 响应结构，前端无需编写另一套
+解析逻辑。
+"""
 
 from __future__ import annotations
 
@@ -13,6 +17,7 @@ from backend.agents.schemas import (
 
 
 def _sentiment_line(stats: dict) -> str:
+    """把三类情感计数组织成可直接展示的摘要句。"""
     total = stats.get("total") or 0
     if not total:
         return "当前样本中缺少可用的情感预测结果，建议先执行批量情感预测。"
@@ -23,6 +28,7 @@ def _sentiment_line(stats: dict) -> str:
 
 
 def build_opinion_fallback(anime: dict, stats: dict, topics: list, comments: dict, aspect: dict) -> OpinionReportSchema:
+    """仅依据本地统计数据组装舆情报告，不虚构缺失证据。"""
     topic_text = []
     for topic in topics[:5]:
         words = topic.get("keywords") or []
@@ -60,6 +66,7 @@ def build_opinion_fallback(anime: dict, stats: dict, topics: list, comments: dic
 
 
 def build_recommendation_fallback(query: str, candidates: list, preferences: dict) -> RecommendationResponseSchema:
+    """按预计算候选分数生成最多三条本地推荐。"""
     normalized = "".join(query.strip().lower().split()).strip("，。！？!? ")
     if normalized in {"", "推荐", "推荐一下", "推荐动漫", "想看动漫", "有没有推荐", "随便推荐", "不知道看什么"}:
         return RecommendationResponseSchema(

@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
+"""单轮推荐接口使用的 LLM 服务与本地降级逻辑。
 
+本模块直接调用 OpenAI 兼容 HTTP 接口，不参与 LangChain Agent 工作流。
+意图识别和简介生成均设计了本地/数据库降级，外部模型失败不会中断接口。
+"""
 
 import json
 import logging
@@ -17,7 +21,7 @@ TIMEOUT = 20
 
 
 def _call_llm(messages: list, temperature: float = 0.3, enable_search: bool = False) -> str | None:
-    """调用 LLM chat completions 接口（OpenAI 兼容格式）。"""
+    """调用 OpenAI 兼容 chat completions；失败时记录日志并返回 None。"""
     if not LLM_API_KEY:
         logger.warning("LLM_API_KEY 未配置，跳过 LLM 调用")
         return None
@@ -55,7 +59,7 @@ def _call_llm(messages: list, temperature: float = 0.3, enable_search: bool = Fa
 
 
 def _local_fuzzy_match(query: str, anime_list: list) -> str | None:
-    """本地模糊匹配：计算 query 与动漫名的字符相似度，阈值 0.3。"""
+    """按包含关系和字符相似度在本地动漫名中选取候选。"""
     best_score = 0.0
     best_name = None
     for name in anime_list:
@@ -123,7 +127,7 @@ def extract_recommendation_intent(query: str, anime_list: list) -> dict:
         except (json.JSONDecodeError, KeyError) as e:
             logger.warning("LLM 返回格式解析失败: %s | 原始输出: %s", e, llm_output)
 
-    # 降级：本地模糊匹配
+    # 模型不可用、JSON 无效或越过候选白名单时，统一退回本地模糊匹配。
     matched_name = _local_fuzzy_match(query, anime_list)
     if matched_name:
         reply = f"根据您的描述，为您推荐「{matched_name}」："
@@ -140,6 +144,7 @@ def generate_anime_description(anime_name: str, anime_id: int = None) -> str:
 
     两段以空行分隔，始终不返回空字符串。
     """
+    # 降级链：联网模型 → 模型自身知识 → 本地评论归纳 → 固定占位说明。
     # ── 第一段：联网搜索 → 自身知识 → 评论速览 ──────────────────
     part1 = _llm_description_with_search(anime_name)
     if not part1:
@@ -171,7 +176,7 @@ def generate_anime_description(anime_name: str, anime_id: int = None) -> str:
 
 
 def _llm_description_with_search(anime_name: str) -> str:
-    """联网搜索生成动漫简介（约200字）。搜索无可信结果时返回空字符串。"""
+    """请求支持搜索的模型生成简介；无可信结果时返回空字符串。"""
     prompt_template = get_prompt("anime_description_search")
     messages = [
         {
@@ -194,7 +199,7 @@ def _llm_description_with_search(anime_name: str) -> str:
 
 
 def _llm_description_from_knowledge(anime_name: str) -> str:
-    """用 LLM 自身知识生成动漫简介（约200字）。完全不了解时返回空字符串。"""
+    """在无联网能力时根据模型已有知识生成简介。"""
     prompt_template = get_prompt("anime_description_knowledge")
     messages = [
         {
@@ -217,7 +222,7 @@ def _llm_description_from_knowledge(anime_name: str) -> str:
 
 
 def _llm_description_from_comments(anime_name: str, comments: list) -> str:
-    """根据数据库评论归纳动漫舆情分析（约150字）。"""
+    """把少量本地评论作为证据，让模型归纳作品特点。"""
     comment_block = "\n".join(f"- {c}" for c in comments)
     prompt_template = get_prompt("anime_comment_summary")
     messages = [
@@ -238,7 +243,7 @@ def _llm_description_from_comments(anime_name: str, comments: list) -> str:
 
 
 def _fetch_comments_from_db(anime_id: int, limit: int = 20) -> list:
-    """通过共享同步 ORM 读取指定动漫的前 N 条有效评论文本。"""
+    """读取前 N 条非空评论文本，限制数量以控制提示词体积。"""
     try:
         with orm_session() as session:
             rows = session.scalars(

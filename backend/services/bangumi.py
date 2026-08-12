@@ -1,9 +1,8 @@
 # -*- coding: utf-8 -*-
-"""
-Bangumi 公开 API 封装
+"""Bangumi 公开 API 的容错封装。
 
-用于获取动漫简介、评分等元数据。
-缓存策略：进程级内存字典（重启后失效）。
+用于补充动漫简介、评分等非核心元数据。结果使用进程内字典缓存，重启后
+失效；超时、限流或响应异常统一返回 ``None``，不阻断本地业务主流程。
 """
 
 import logging
@@ -13,7 +12,7 @@ from urllib.parse import quote
 
 logger = logging.getLogger(__name__)
 
-# 进程级缓存
+# 搜索结果和详情分开缓存，避免同一主题重复发起两种请求。
 _search_cache: dict = {}
 _detail_cache: dict = {}
 
@@ -27,7 +26,7 @@ TIMEOUT = float(os.environ.get("BANGUMI_TIMEOUT", "3"))
 
 def search_anime(name: str) -> dict | None:
     """
-    通过动漫名在 Bangumi 搜索，返回第一条结果。
+    按名称搜索最相关的 Bangumi 动漫主题。
 
     Returns:
         dict: {bgm_id, name, summary, rating, image} 或 None
@@ -65,7 +64,7 @@ def search_anime(name: str) -> dict | None:
 
 def get_subject_detail(bgm_id: int) -> dict | None:
     """
-    通过 Bangumi subject ID 获取详情（summary 更完整）。
+    读取单个 Bangumi 主题详情，并规范化常用字段。
 
     Returns:
         dict: {bgm_id, name, summary, rating, image} 或 None

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""与旧 Flask-JWT-Extended Token 兼容的 JWT 工具。"""
+"""生成并校验 JWT，同时保持与旧 Flask-JWT-Extended 载荷兼容。"""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ _bearer = HTTPBearer(auto_error=False)
 
 
 def create_access_token(identity: str | int) -> str:
-    """生成可被旧 Flask-JWT-Extended 识别的 HS256 access token。"""
+    """生成包含旧系统必需字段的 HS256 access token。"""
     now = datetime.now(timezone.utc)
     payload = {
         "fresh": False,
@@ -35,11 +35,13 @@ def create_access_token(identity: str | int) -> str:
 def get_current_user_id(
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
 ) -> int:
+    """作为 FastAPI 依赖解析 Bearer Token，并返回整数用户 ID。"""
     if credentials is None:
         raise ApiError("缺少 Authorization Header", 401)
     if credentials.scheme.lower() != "bearer":
         raise ApiError("Authorization Header 必须使用 Bearer Token", 401)
 
+    # decode 同时完成签名、过期时间和算法白名单校验。
     try:
         payload = jwt.decode(
             credentials.credentials,

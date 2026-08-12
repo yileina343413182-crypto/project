@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Build RAG documents from the local anime sentiment database."""
+"""把动漫、情感统计、主题和评论转换为可检索 RAG 文档并构建索引。"""
 
 from __future__ import annotations
 
@@ -19,10 +19,12 @@ logger = logging.getLogger(__name__)
 
 
 def make_collection_name(prefix: str = "rag") -> str:
+    """生成带时间戳的新集合名，避免重建时覆盖当前活动索引。"""
     return f"{prefix}_{time.strftime('%Y%m%d_%H%M%S')}"
 
 
 def _doc(doc_id: str, source_type: str, content: str, metadata: dict) -> dict:
+    """统一文档结构，并附加稳定内容哈希用于幂等更新。"""
     metadata = {
         "doc_id": doc_id,
         "source_type": source_type,
@@ -44,6 +46,7 @@ def _doc(doc_id: str, source_type: str, content: str, metadata: dict) -> dict:
 
 
 def build_documents(anime_id: int | None = None, comment_limit_per_anime: int = 800) -> list[dict]:
+    """构建动漫描述、统计、主题及受限数量评论的文档集合。"""
     anime_items = get_all_anime()
     if anime_id is not None:
         anime_items = [item for item in anime_items if int(item["id"]) == int(anime_id)]
@@ -94,6 +97,7 @@ def build_documents(anime_id: int | None = None, comment_limit_per_anime: int = 
 
 
 def _comment_documents(anime_id: int, anime_name: str, platform: str, limit: int) -> Iterable[dict]:
+    """流式读取指定动漫评论，避免一次加载整张评论表。"""
     with orm_session() as session:
         rows = session.execute(
             select(
@@ -129,7 +133,9 @@ def _comment_documents(anime_id: int, anime_name: str, platform: str, limit: int
 
 
 def run_index_job(job_id: int, collection_name: str, anime_id: int | None = None, activate: bool = True) -> dict:
+    """完成文档构建、数据库 upsert、向量写入和可选活动集合切换。"""
     update_index_job(job_id, status="running", started_at=time.strftime("%Y-%m-%d %H:%M:%S"), current_step="building_documents", progress=8)
+    # 先写可重建的数据库文档副本，再尝试向量化；向量不可用时仍可关键词检索。
     docs = build_documents(anime_id=anime_id)
     total = len(docs)
     update_index_job(job_id, total_docs=total, current_step="saving_sqlite_documents", progress=25)

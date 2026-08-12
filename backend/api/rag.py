@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""RAG indexing, retrieval debug, and evaluation APIs."""
+"""RAG 管理接口：异步建索引、查看状态、调试检索和运行内置评估。"""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from backend.api.common import error_response, ok
 from backend.rag.embeddings import embedding_status
 from backend.rag.evaluator import run_builtin_eval
 from backend.rag.indexer import make_collection_name, run_index_job
+from backend.rag.reranker import reranker_status
 from backend.rag.retriever import search_evidence
 from backend.rag.async_storage import (
     count_documents,
@@ -38,10 +39,12 @@ router = APIRouter(prefix="/api/rag")
 
 
 def _submit_index_job(job_id: int, collection_name: str, anime_id: int | None = None, activate: bool = True) -> None:
+    """把 CPU/网络密集的索引构建提交给专用线程池。"""
     _executor.submit(_run_index_worker, job_id, collection_name, anime_id, activate)
 
 
 def _run_index_worker(job_id: int, collection_name: str, anime_id: int | None, activate: bool) -> None:
+    """执行索引任务，并在异常时确保任务状态被标记为失败。"""
     try:
         run_index_job(job_id, collection_name, anime_id=anime_id, activate=activate)
     except Exception as exc:  # pragma: no cover
@@ -54,6 +57,7 @@ async def rebuild_index(
     _user_id: int = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_async_session),
 ):
+    """为全部数据创建新集合；是否激活由请求参数控制。"""
     collection_name = make_collection_name()
     job_id = await create_index_job(db, "rebuild", collection_name)
     await db.commit()
@@ -67,6 +71,7 @@ async def index_anime(
     _user_id: int = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_async_session),
 ):
+    """只为指定动漫创建增量索引任务。"""
     collection_name = await get_active_collection(db) or make_collection_name("rag_partial")
     job_id = await create_index_job(db, "anime", collection_name, anime_id=anime_id)
     await db.commit()
@@ -80,6 +85,7 @@ async def index_job(
     _user_id: int = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_async_session),
 ):
+    """查询单个索引任务的进度和错误信息。"""
     job = await get_index_job(db, job_id)
     if not job:
         return error_response("index job not found", 404)
@@ -91,6 +97,7 @@ async def index_status(
     _user_id: int = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_async_session),
 ):
+    """汇总活动集合、文档数、Embedding 状态和最近任务。"""
     active = await get_active_collection(db)
     metadata = await get_collection_metadata(db, active)
     embedding = embedding_status()
@@ -99,6 +106,7 @@ async def index_status(
         "document_count": await count_documents(db, active) if active else 0,
         "recent_jobs": await list_index_jobs(db),
         "embedding": embedding,
+        "reranker": reranker_status(),
         "embedding_provider": embedding.get("provider"),
         "embedding_model": embedding.get("model"),
         "embedding_dimension": (metadata or {}).get("embedding_dimension", 0),
@@ -113,6 +121,7 @@ async def search(
     body: dict | None = Body(default=None),
     _user_id: int = Depends(get_current_user_id),
 ):
+    """暴露混合检索结果，便于开发阶段检查证据来源。"""
     body = body or {}
     query = (body.get("query") or "").strip()
     anime_id = body.get("anime_id")
@@ -128,6 +137,7 @@ async def eval_run(
     body: dict | None = Body(default=None),
     _user_id: int = Depends(get_current_user_id),
 ):
+    """在线程池中运行内置 RAG 用例，避免阻塞事件循环。"""
     body = body or {}
     top_k = int(body.get("top_k") or 5)
     return ok(await run_in_threadpool(run_builtin_eval, top_k))

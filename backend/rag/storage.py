@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Synchronous ORM/Core persistence for RAG jobs, documents, and evals."""
+"""RAG 索引任务、文档、活动集合与评估记录的同步持久化层。
+
+索引后台线程使用这里批量写入；检索在 Chroma 无结果时也会查询业务数据库
+中的 ``rag_documents``，因此向量索引损坏不会直接造成证据完全不可用。
+"""
 
 from __future__ import annotations
 
@@ -33,6 +37,7 @@ _LOW_INFO_TERMS = {"推荐", "动漫", "动画", "想看", "有没有", "一部"
 
 
 def query_terms(query: str) -> list[str]:
+    """对查询分词并去重，得到关键词降级检索使用的少量词项。"""
     cleaned = re.sub(r"[^\w\u4e00-\u9fff]+", " ", (query or "").lower())
     raw = list(jieba.cut(cleaned)) if jieba else cleaned.split()
     result = []
@@ -44,6 +49,7 @@ def query_terms(query: str) -> list[str]:
 
 
 def _date_value(value):
+    """把日期转换为可序列化字符串。"""
     if isinstance(value, datetime):
         return value.strftime("%Y-%m-%d %H:%M:%S")
     if isinstance(value, date):
@@ -52,6 +58,7 @@ def _date_value(value):
 
 
 def _json_value(value, default):
+    """兼容 JSON 列对象与旧数据库中的 JSON 字符串。"""
     if value is None:
         return default
     if isinstance(value, str):
@@ -63,6 +70,7 @@ def _json_value(value, default):
 
 
 def init_rag_tables(db_path=None) -> None:
+    """以 checkfirst 模式补建全部 RAG 业务表。"""
     engine = get_sync_engine(db_path=db_path) if db_path else get_sync_engine()
     RagIndexJob.metadata.create_all(
         engine,
@@ -78,6 +86,8 @@ def init_rag_tables(db_path=None) -> None:
         checkfirst=True,
     )
 
+
+# ===== 索引任务与活动集合 =====
 
 def _job_dict(job: RagIndexJob | None) -> dict | None:
     if job is None:
@@ -135,6 +145,7 @@ def list_index_jobs(limit: int = 8) -> list[dict]:
 
 
 def _execute_upsert(session, model, values: dict, conflict_columns: list, update_columns: list):
+    """按 MySQL/SQLite 方言构造等价 upsert，保持同一业务语义。"""
     if session.bind.dialect.name == "mysql":
         statement = mysql_insert(model).values(**values)
         session.execute(
@@ -153,6 +164,7 @@ def _execute_upsert(session, model, values: dict, conflict_columns: list, update
 
 
 def set_active_collection(collection_name: str) -> None:
+    """原子更新唯一活动集合指针，后续检索立即切换。"""
     now = datetime.now()
     with orm_session() as session:
         _execute_upsert(
@@ -178,6 +190,7 @@ def set_collection_metadata(
     dimension: int,
     document_count: int,
 ) -> None:
+    """保存集合使用的 Embedding 配置和构建统计。"""
     with orm_session() as session:
         _execute_upsert(
             session,
@@ -211,7 +224,10 @@ def get_collection_metadata(collection_name: str | None) -> dict | None:
         }
 
 
+# ===== 可重建的 RAG 文档副本与关键词检索 =====
+
 def upsert_documents(collection_name: str, docs: list[dict]) -> None:
+    """按文档 ID 幂等写入内容、元数据与稳定内容哈希。"""
     if not docs:
         return
     now = datetime.now()
@@ -266,6 +282,7 @@ def keyword_search_documents(
     anime_id: int | None = None,
     top_k: int = 6,
 ) -> list[dict]:
+    """在数据库文档中做关键词匹配，作为 Chroma 检索的第一层降级。"""
     collection_name = collection_name or get_active_collection()
     if not collection_name:
         return []
@@ -310,6 +327,7 @@ def keyword_search_documents(
 
 
 def _source_label(metadata: dict) -> str:
+    """把内部来源类型转换为可展示的证据标签。"""
     source_type = metadata.get("source_type", "")
     anime_name = metadata.get("anime_name", "")
     comment_id = metadata.get("comment_id")
@@ -318,7 +336,10 @@ def _source_label(metadata: dict) -> str:
     return f"{anime_name} {source_type}".strip()
 
 
+# ===== RAG 评估运行与逐项结果 =====
+
 def create_eval_run() -> int:
+    """创建 running 状态的评估批次。"""
     with orm_session() as session:
         run = RagEvalRun(status="running", metrics={})
         session.add(run)
@@ -332,6 +353,7 @@ def finish_eval_run(
     status: str = "succeeded",
     error: str | None = None,
 ) -> None:
+    """写入汇总指标并将评估批次推进到终态。"""
     with orm_session() as session:
         session.execute(
             update(RagEvalRun)

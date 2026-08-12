@@ -49,7 +49,7 @@ async def register(
     if await get_user_by_username(session, username):
         return error_response("用户名已存在，请换一个")
 
-    # bcrypt 哈希密码
+    # bcrypt 是 CPU 密集型操作，移到线程池以免阻塞 FastAPI 事件循环。
     pwd_hash = await run_in_threadpool(
         bcrypt.hashpw,
         password.encode("utf-8"),
@@ -84,7 +84,7 @@ async def login(
     if not user:
         return error_response("用户名或密码错误", 401)
 
-    # 验证密码
+    # 密码校验同样在线程池执行，数据库会话仍留在当前异步请求中。
     valid = await run_in_threadpool(
         bcrypt.checkpw,
         password.encode("utf-8"),

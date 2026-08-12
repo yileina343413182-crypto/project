@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Immutable prompt assets with independently switchable active versions."""
+"""PromptOps 注册表：校验不可变提示词资产，并独立切换各模板活动版本。
+
+模板文件的规范化 SHA-256 必须与 manifest 一致；读取后冻结元数据并缓存，
+防止运行中被意外修改。版本激活只更新 active_versions 映射。
+"""
 
 from __future__ import annotations
 
@@ -23,21 +27,23 @@ _ACTIVATION_LOCK = threading.Lock()
 
 
 class PromptRegistryError(RuntimeError):
-    """Raised when a prompt asset or version registry is invalid."""
+    """提示词资产、清单或活动版本不符合约定时抛出。"""
 
 
 def _normalized_template_hash(raw: bytes) -> str:
+    """统一换行符后计算哈希，避免 Windows/Unix 换行造成误差。"""
     text = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def compute_prompt_hash(path: str | Path) -> str:
-    """Return the line-ending-independent SHA-256 used by the manifest."""
+    """计算单个模板文件的规范化 SHA-256。"""
     return _normalized_template_hash(Path(path).read_bytes())
 
 
 @dataclass(frozen=True)
 class PromptTemplate:
+    """已验证且不可变的提示词版本及其各个渲染区段。"""
     name: str
     version: str
     system_template: str
@@ -68,6 +74,7 @@ class PromptTemplate:
 
 
 def _read_yaml(path: Path) -> dict:
+    """读取 YAML，并确保顶层一定是映射。"""
     try:
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     except (OSError, yaml.YAMLError) as exc:
@@ -79,6 +86,7 @@ def _read_yaml(path: Path) -> dict:
 
 @lru_cache(maxsize=1)
 def _manifest() -> dict[str, dict[str, str]]:
+    """读取并冻结模板哈希清单。"""
     data = _read_yaml(MANIFEST_PATH).get("prompts", {})
     if not isinstance(data, dict):
         raise PromptRegistryError("Prompt manifest must contain a prompts mapping")
@@ -95,6 +103,7 @@ def _manifest() -> dict[str, dict[str, str]]:
 
 
 def get_active_versions() -> dict[str, str]:
+    """返回各模板当前活动版本的普通字典副本。"""
     data = _read_yaml(ACTIVE_VERSIONS_PATH).get("active_versions", {})
     if not isinstance(data, dict):
         raise PromptRegistryError("active_versions.yaml must contain a mapping")
@@ -109,6 +118,7 @@ def get_active_versions() -> dict[str, str]:
 
 
 def list_prompt_versions(name: str) -> tuple[str, ...]:
+    """列出清单中登记的指定模板全部版本。"""
     versions = _manifest().get(name)
     if versions is None:
         raise KeyError(name)
@@ -117,6 +127,7 @@ def list_prompt_versions(name: str) -> tuple[str, ...]:
 
 @lru_cache(maxsize=None)
 def _load_prompt(name: str, version: str) -> PromptTemplate:
+    """校验清单、文件哈希和必需字段后加载一个不可变模板。"""
     versions = _manifest().get(name)
     if versions is None or version not in versions:
         raise KeyError(f"{name}@{version}")
@@ -157,6 +168,7 @@ def _load_prompt(name: str, version: str) -> PromptTemplate:
 
 
 def get_prompt(name: str, version: str | None = None) -> PromptTemplate:
+    """获取显式版本；未指定时解析当前活动版本。"""
     selected_version = version
     if selected_version is None:
         try:
@@ -167,7 +179,7 @@ def get_prompt(name: str, version: str | None = None) -> PromptTemplate:
 
 
 def activate_prompt_version(name: str, version: str) -> PromptTemplate:
-    """Atomically switch one active version without changing any template file."""
+    """先完整验证目标版本，再原子替换活动版本映射文件。"""
     prompt = get_prompt(name, version=version)
     with _ACTIVATION_LOCK:
         active = get_active_versions()
@@ -191,6 +203,7 @@ def prompt_trace(
     *,
     prompt: PromptTemplate | None = None,
 ) -> dict:
+    """生成随 Agent 结果保存的模板版本、哈希、模型与检索追踪字段。"""
     actual_prompt = prompt or get_prompt(name)
     if actual_prompt.name != name:
         raise PromptRegistryError(
