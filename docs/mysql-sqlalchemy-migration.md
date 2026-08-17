@@ -2,7 +2,7 @@
 
 ## 本阶段采用的结构
 
-- 16 张业务表由一套 SQLAlchemy ORM 模型维护。
+- 17 张业务表由一套 SQLAlchemy ORM 模型维护。
 - FastAPI 请求使用 `AsyncSession` 与 `aiomysql`，每个请求一个会话。
 - Agent 线程、RAG 重任务、爬虫和离线脚本继续使用同步 Session 与 PyMySQL，每个线程/任务一个会话。
 - 普通 CRUD 使用 ORM；批量写入、聚合和方言 upsert 使用 SQLAlchemy Core。
@@ -20,7 +20,7 @@
    & '..\.venv\Scripts\python.exe' -m alembic upgrade head
    ```
 
-5. 在服务停止写入期间迁移 16 张业务表：
+5. 在服务停止写入期间迁移 17 张业务表：
 
    ```powershell
    & '..\.venv\Scripts\python.exe' 'scripts\migrate_sqlite_to_mysql.py'
@@ -34,18 +34,24 @@
    & '..\.venv\Scripts\python.exe' 'scripts\verify_mysql_migration.py'
    ```
 
-   再执行同步/异步 MySQL 事务运行探测；探测数据会回滚，并同时确认 Checkpoint SQLite 未变化：
+   再执行同步/异步 MySQL 事务运行探测；探测数据会回滚。若开发环境显式使用 SQLite
+   Checkpointer，脚本也会确认该文件未变化：
 
    ```powershell
    & '..\.venv\Scripts\python.exe' 'scripts\verify_mysql_runtime.py'
    ```
 
-6. 先以单 Uvicorn worker 启动，验证登录、历史、分析查询、Agent 任务、RAG 检索及写后读一致性，再进行前端构建和完整回归。
-7. 观察稳定后再评估增加 worker。Agent 当前含进程内线程池和状态，不能仅通过增加 worker 获得安全的横向扩展。
+6. 启动 Redis 8、推荐/舆情 Celery Worker 和 FastAPI，验证登录、历史、Agent 任务、
+   RAG 检索及写后读一致性，再进行前端构建和完整回归。同一会话仍严格串行；两个
+   Agent 队列的 Worker concurrency 分别使用对应并发上限。
+7. 观察稳定后可分别横向增加 FastAPI 与 Celery Worker。生产必须关闭 SQLite Checkpointer
+   降级，确保所有 Worker 共用 Redis Checkpoint；详见 `docs/agent-celery-redis.md`。
 
 ## 回退
 
-停止服务后移除 MySQL 数据库环境变量，使应用重新指向迁移前 SQLite 业务库；Checkpoint 路径无需变化。切换窗口内若 MySQL 已接受新写入，回退前必须先决定这些增量如何回灌，不能直接覆盖任一数据库。
+停止 API 与 Celery Worker 后移除 MySQL 数据库环境变量，使应用重新指向迁移前 SQLite
+业务库。Redis Checkpoint 不随业务库切换；切换窗口内若 MySQL 已接受新写入，回退前必须
+先决定这些增量如何回灌，不能直接覆盖任一数据库。
 
 ## 后续：完全删除 SQLite
 

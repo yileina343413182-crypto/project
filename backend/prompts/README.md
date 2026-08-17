@@ -50,7 +50,9 @@ task halfway through generation or repair.
 
 ## Current guarded versions
 
-- `recommendation@rag-v4-personalized-advisor`
+- `recommendation@rag-v6-bounded-reasons`
+- `recommendation_followup@v1`
+- `watch_guide@v1`
 - `opinion_report@rag-v2-injection-guard`
 
 These templates explicitly mark user input, history, candidate data, comments,

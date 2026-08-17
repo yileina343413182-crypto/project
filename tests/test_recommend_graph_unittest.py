@@ -9,14 +9,90 @@ from unittest.mock import patch
 from langchain_core.messages import AIMessage
 from langgraph.checkpoint.memory import InMemorySaver
 
+from backend.agents.fallback import build_recommendation_fallback
+from backend.agents import recommend_graph as recommend_graph_module
 from backend.agents.recommend_graph import (
     QUESTIONNAIRE_SLOTS,
     create_recommendation_graph,
+    repair,
     retrieve_evidence,
     route_evidence,
+    route_repair,
+    route_validation,
     run_recommendation_graph,
+    validate,
+)
+from backend.agents.recommend_agent import _validate_recommendation
+from backend.agents.schemas import (
+    RECOMMEND_REASON_MAX_CHARS,
+    RECOMMEND_REASON_MIN_CHARS,
+    RetrievalEvidence,
 )
 from backend.agents.tools import RECOMMEND_TOOLS
+
+
+class RecommendationCheckpointerTest(unittest.TestCase):
+    def tearDown(self):
+        recommend_graph_module.build_recommendation_graph.cache_clear()
+        recommend_graph_module._get_recommendation_checkpointer.cache_clear()
+
+    def test_redis_checkpointer_is_initialized_with_setup(self):
+        class DummyRedisSaver:
+            def __init__(self):
+                self.setup_called = False
+
+            def setup(self):
+                self.setup_called = True
+
+        saver = DummyRedisSaver()
+        with (
+            patch.object(recommend_graph_module, "RECOMMEND_CHECKPOINT_BACKEND", "redis"),
+            patch.object(recommend_graph_module, "RedisSaver", return_value=saver) as factory,
+        ):
+            checkpointer = recommend_graph_module._get_recommendation_checkpointer()
+
+        self.assertIs(checkpointer, saver)
+        self.assertTrue(saver.setup_called)
+        factory.assert_called_once()
+        kwargs = factory.call_args.kwargs
+        self.assertEqual(
+            kwargs["ttl"],
+            {
+                "default_ttl": recommend_graph_module.RECOMMEND_CHECKPOINT_TTL_MINUTES,
+                "refresh_on_read": True,
+            },
+        )
+        self.assertEqual(
+            kwargs["connection_args"]["max_connections"],
+            recommend_graph_module.RECOMMEND_REDIS_MAX_CONNECTIONS,
+        )
+        self.assertTrue(kwargs["checkpoint_prefix"].endswith("checkpoint"))
+
+    def test_redis_failure_only_falls_back_when_enabled(self):
+        sqlite_saver = object()
+        with (
+            patch.object(recommend_graph_module, "RECOMMEND_CHECKPOINT_BACKEND", "redis"),
+            patch.object(recommend_graph_module, "RECOMMEND_CHECKPOINT_SQLITE_FALLBACK", True),
+            patch.object(recommend_graph_module, "RedisSaver", side_effect=OSError("offline")),
+            patch.object(
+                recommend_graph_module,
+                "_sqlite_recommendation_checkpointer",
+                return_value=sqlite_saver,
+            ),
+        ):
+            self.assertIs(
+                recommend_graph_module._get_recommendation_checkpointer(),
+                sqlite_saver,
+            )
+
+        recommend_graph_module._get_recommendation_checkpointer.cache_clear()
+        with (
+            patch.object(recommend_graph_module, "RECOMMEND_CHECKPOINT_BACKEND", "redis"),
+            patch.object(recommend_graph_module, "RECOMMEND_CHECKPOINT_SQLITE_FALLBACK", False),
+            patch.object(recommend_graph_module, "RedisSaver", side_effect=OSError("offline")),
+        ):
+            with self.assertRaises(RuntimeError):
+                recommend_graph_module._get_recommendation_checkpointer()
 
 
 class FakePlanningModel:
@@ -189,6 +265,84 @@ class RecommendationGraphTest(unittest.TestCase):
             ],
         )
 
+    def test_recommendation_reason_uses_trimmed_unicode_length_contract(self):
+        candidates = [{"id": 1, "name": "测试动画"}]
+        for length, is_valid in (
+            (RECOMMEND_REASON_MIN_CHARS - 1, False),
+            (RECOMMEND_REASON_MIN_CHARS, True),
+            (RECOMMEND_REASON_MAX_CHARS, True),
+            (RECOMMEND_REASON_MAX_CHARS + 1, False),
+        ):
+            with self.subTest(length=length):
+                data = {
+                    "recommendations": [
+                        {
+                            "anime_id": 1,
+                            "reason": f"  {'理' * length}  ",
+                            "evidence_refs": [],
+                        }
+                    ]
+                }
+                cleaned, errors = _validate_recommendation(
+                    data,
+                    candidates,
+                    {1: []},
+                )
+
+                self.assertEqual(
+                    errors == [],
+                    is_valid,
+                )
+                self.assertEqual(
+                    len(cleaned["recommendations"][0]["reason"]),
+                    length,
+                )
+
+    def test_retrieval_evidence_preserves_hybrid_ranking_diagnostics(self):
+        evidence = RetrievalEvidence(
+            doc_id="comment:1",
+            rrf_score=0.125,
+            rerank_score=0.91,
+            vector_rank=2,
+            keyword_rank=1,
+        ).model_dump()
+
+        self.assertEqual(evidence["rrf_score"], 0.125)
+        self.assertEqual(evidence["rerank_score"], 0.91)
+        self.assertEqual(evidence["vector_rank"], 2)
+        self.assertEqual(evidence["keyword_rank"], 1)
+
+    def test_local_fallback_reasons_stay_within_length_contract(self):
+        result = build_recommendation_fallback(
+            "想看科幻治愈动画",
+            [
+                {"id": 1, "name": "测试动画", "sentiment": {}},
+                {
+                    "id": 2,
+                    "name": "作品" * 80,
+                    "platform": "平台" * 80,
+                    "final_score": 1.2345,
+                    "topics": ["主题" * 40] * 4,
+                    "sentiment": {
+                        "total": 99999,
+                        "positive": 80000,
+                        "neutral": 10000,
+                        "negative": 9999,
+                    },
+                },
+            ],
+            {
+                "preferred_genres": ["科幻" * 30],
+                "preferred_moods": ["治愈" * 30],
+            },
+        )
+
+        self.assertEqual(len(result.recommendations), 2)
+        for recommendation in result.recommendations:
+            reason_chars = len(recommendation.reason.strip())
+            self.assertGreaterEqual(reason_chars, RECOMMEND_REASON_MIN_CHARS)
+            self.assertLessEqual(reason_chars, RECOMMEND_REASON_MAX_CHARS)
+
     def test_multilevel_questions_persist_answers_before_recommendation(self):
         turns = [
             ("推荐动漫", "preferred_genres"),
@@ -208,6 +362,14 @@ class RecommendationGraphTest(unittest.TestCase):
         self.assertFalse(final_result["need_clarification"])
         self.assertTrue(final_payload["fallback"])
         self.assertEqual(len(final_result["recommendations"]), 1)
+        self.assertTrue(
+            all(
+                RECOMMEND_REASON_MIN_CHARS
+                <= len(item["reason"].strip())
+                <= RECOMMEND_REASON_MAX_CHARS
+                for item in final_result["recommendations"]
+            )
+        )
         self.assertEqual(self.preferences["preferred_genres"], ["科幻"])
         self.assertEqual(self.preferences["preferred_moods"], ["轻松", "治愈"])
         self.assertEqual(self.preferences["likes"], ["剧情扎实", "角色成长"])
@@ -241,7 +403,7 @@ class RecommendationGraphTest(unittest.TestCase):
             "recommendations": [
                 {
                     "anime_id": 1,
-                    "reason": "符合当前偏好，并有本地评论证据。",
+                    "reason": "理" * RECOMMEND_REASON_MIN_CHARS,
                     "match_tags": ["匹配"],
                     "evidence_refs": [],
                 }
@@ -324,7 +486,7 @@ class RecommendationGraphTest(unittest.TestCase):
         )
         self.assertEqual(
             payload["result"]["prompt_trace"]["template_version"],
-            "rag-v4-personalized-advisor",
+            "rag-v6-bounded-reasons",
         )
         self.assertEqual(
             len(payload["result"]["prompt_trace"]["template_hash"]),
@@ -333,6 +495,51 @@ class RecommendationGraphTest(unittest.TestCase):
         step_names = [step["name"] for step in payload["agent_steps"]]
         self.assertIn("validate_recommendation", step_names)
         self.assertIn("finalize_recommendation", step_names)
+
+    def test_short_reason_is_repaired_then_revalidated(self):
+        state = {
+            "candidates": [{"id": 1, "name": "测试动画"}],
+            "evidence_map": {1: []},
+            "packed_candidates": [{"anime_id": 1, "name": "测试动画"}],
+            "prompt_trace": {"template_version": "rag-v6-bounded-reasons"},
+            "repair_attempts": 0,
+            "llm_data": {
+                "need_clarification": False,
+                "recommendations": [
+                    {
+                        "anime_id": 1,
+                        "reason": "过短",
+                        "evidence_refs": [],
+                    }
+                ],
+                "preference_updates": {},
+            },
+        }
+        first_validation = validate(state)
+        self.assertEqual(route_validation(first_validation), "repair")
+        self.assertIn("got 2", first_validation["validation_errors"][0])
+
+        repaired_response = {
+            "need_clarification": False,
+            "recommendations": [
+                {
+                    "anime_id": 1,
+                    "reason": "修" * RECOMMEND_REASON_MIN_CHARS,
+                    "evidence_refs": [],
+                }
+            ],
+            "preference_updates": {},
+        }
+        with patch(
+            "backend.agents.recommend_graph.get_chat_model",
+            return_value=FakeStructuredModel(repaired_response),
+        ):
+            repaired = repair({**state, **first_validation})
+
+        self.assertEqual(route_repair(repaired), "validate")
+        second_validation = validate({**state, **repaired})
+        self.assertEqual(second_validation["validation_errors"], [])
+        self.assertEqual(route_validation({**repaired, **second_validation}), "success")
 
     def test_evidence_exception_is_converted_to_local_fallback_state(self):
         state = {
@@ -374,7 +581,7 @@ class RecommendationGraphTest(unittest.TestCase):
             "recommendations": [
                 {
                     "anime_id": 1,
-                    "reason": "符合偏好。",
+                    "reason": "理" * RECOMMEND_REASON_MIN_CHARS,
                     "match_tags": ["匹配"],
                     "evidence_refs": [],
                 }

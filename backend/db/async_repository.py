@@ -12,7 +12,7 @@ from datetime import date, datetime
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.db.models import Anime, ChatHistory, Comment, Topic, User
+from backend.db.models import Anime, ChatHistory, Comment, Topic, User, WatchGuide
 
 
 def _date_value(value):
@@ -124,6 +124,76 @@ async def get_chat_history(
 async def delete_chat_message(session: AsyncSession, msg_id: int, user_id: int) -> int:
     result = await session.execute(
         delete(ChatHistory).where(ChatHistory.id == msg_id, ChatHistory.user_id == user_id)
+    )
+    return result.rowcount
+
+
+# ===== 待看番剧指南 =====
+
+def _watch_guide_dict(record: WatchGuide, *, include_content: bool = False) -> dict:
+    result = {
+        "id": record.id,
+        "anime_name": record.anime_name,
+        "created_at": _date_value(record.created_at),
+        "source_session_id": record.source_session_id,
+    }
+    if include_content:
+        result["guide_content"] = record.guide_content
+    return result
+
+
+async def list_watch_guides(
+    session: AsyncSession,
+    user_id: int,
+    page: int = 1,
+    page_size: int = 20,
+) -> dict:
+    """按创建时间倒序分页返回当前用户的待看指南摘要。"""
+    page = max(1, page)
+    page_size = min(50, max(1, page_size))
+    offset = (page - 1) * page_size
+    total = await session.scalar(
+        select(func.count()).select_from(WatchGuide).where(WatchGuide.user_id == user_id)
+    ) or 0
+    rows = (
+        await session.scalars(
+            select(WatchGuide)
+            .where(WatchGuide.user_id == user_id)
+            .order_by(WatchGuide.created_at.desc(), WatchGuide.id.desc())
+            .limit(page_size)
+            .offset(offset)
+        )
+    ).all()
+    return {
+        "items": [_watch_guide_dict(row) for row in rows],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
+
+
+async def get_watch_guide(
+    session: AsyncSession,
+    guide_id: int,
+    user_id: int,
+) -> dict | None:
+    """读取属于当前用户的单份指南；越权与不存在均返回 ``None``。"""
+    record = await session.scalar(
+        select(WatchGuide).where(
+            WatchGuide.id == guide_id,
+            WatchGuide.user_id == user_id,
+        )
+    )
+    return _watch_guide_dict(record, include_content=True) if record is not None else None
+
+
+async def delete_watch_guide(session: AsyncSession, guide_id: int, user_id: int) -> int:
+    """只删除属于当前用户的指定指南，并返回受影响行数。"""
+    result = await session.execute(
+        delete(WatchGuide).where(
+            WatchGuide.id == guide_id,
+            WatchGuide.user_id == user_id,
+        )
     )
     return result.rowcount
 

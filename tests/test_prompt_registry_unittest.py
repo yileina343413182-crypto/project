@@ -36,7 +36,7 @@ class PromptRegistryTest(unittest.TestCase):
             prompt.version,
             active_versions["recommendation"],
         )
-        self.assertEqual(prompt.version, "rag-v4-personalized-advisor")
+        self.assertEqual(prompt.version, "rag-v6-bounded-reasons")
         self.assertEqual(len(prompt.template_hash), 64)
 
     def test_historical_prompt_version_remains_addressable(self):
@@ -63,6 +63,8 @@ class PromptRegistryTest(unittest.TestCase):
         expected = {
             "opinion_report",
             "recommendation",
+            "recommendation_followup",
+            "watch_guide",
             "evidence_answering",
             "recommendation_intent",
             "anime_description_search",
@@ -99,7 +101,7 @@ class PromptRegistryTest(unittest.TestCase):
                 "backend.prompts.registry.get_active_versions",
                 return_value={
                     **get_active_versions(),
-                    "recommendation": "rag-v4-personalized-advisor",
+                    "recommendation": "rag-v6-bounded-reasons",
                 },
             ),
             patch(
@@ -134,6 +136,8 @@ class PromptRegistryTest(unittest.TestCase):
         paths = (
             backend_root / "agents" / "opinion_agent.py",
             backend_root / "agents" / "recommend_agent.py",
+            backend_root / "agents" / "recommend_followup.py",
+            backend_root / "agents" / "watch_guide.py",
             backend_root / "agents" / "recommend_graph.py",
             backend_root / "services" / "llm.py",
         )

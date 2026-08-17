@@ -9,7 +9,7 @@
         <img src="/irina.png" alt="伊蕾娜" class="auth-avatar" />
         <div class="auth-logo-text">
           <span class="auth-system-name">动漫情感分析系统</span>
-          <span class="auth-welcome">加入我们</span>
+          <span class="auth-welcome">来看看吧</span>
         </div>
       </div>
 

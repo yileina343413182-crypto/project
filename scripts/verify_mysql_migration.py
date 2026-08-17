@@ -10,7 +10,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 from sqlalchemy import JSON as SqlJson
-from sqlalchemy import Boolean, create_engine, select
+from sqlalchemy import Boolean, create_engine, inspect, select
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -73,13 +73,23 @@ def _digest_rows(table, rows) -> tuple[int, str]:
 def compare_business_tables(source, target) -> dict[str, dict[str, str | int]]:
     """Compare every normalized column value in every business row."""
     results = {}
+    source_inspector = inspect(source)
     with source.connect() as source_connection, target.connect() as target_connection:
         for table in Base.metadata.sorted_tables:
-            source_result = source_connection.exec_driver_sql(_quoted_select(source, table))
-            source_rows = (
-                _normalize_row(table, dict(zip((column.name for column in table.columns), row)))
-                for row in source_result
-            )
+            if source_inspector.has_table(table.name):
+                available_columns = {
+                    column["name"]
+                    for column in source_inspector.get_columns(table.name)
+                }
+                source_result = source_connection.exec_driver_sql(
+                    _quoted_select(source, table, available_columns)
+                )
+                source_rows = (
+                    _normalize_row(table, dict(zip((column.name for column in table.columns), row)))
+                    for row in source_result
+                )
+            else:
+                source_rows = ()
             source_count, source_digest = _digest_rows(table, source_rows)
 
             order_by = list(table.primary_key.columns)
@@ -106,7 +116,7 @@ def compare_business_tables(source, target) -> dict[str, dict[str, str | int]]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="逐行逐列核验 SQLite 与 MySQL 的 16 张业务表")
+    parser = argparse.ArgumentParser(description="逐行逐列核验 SQLite 与 MySQL 的 17 张业务表")
     parser.add_argument("--source", default=DB_PATH, help="源 SQLite 文件路径")
     parser.add_argument("--target-url", default=DATABASE_URL, help="目标 MySQL SQLAlchemy URL")
     args = parser.parse_args()

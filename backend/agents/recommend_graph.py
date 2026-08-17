@@ -20,6 +20,7 @@ from typing import Annotated, Any, TypedDict
 from uuid import uuid4
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
+from langgraph.checkpoint.redis import RedisSaver
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
@@ -40,14 +41,21 @@ from backend.agents.recommend_context import (
 from backend.agents.schemas import AgentStep, RecommendationResponseSchema
 from backend.agents.tools import RECOMMEND_TOOLS, build_candidate_pool, timed_step
 from backend.config import (
+    AGENT_REDIS_KEY_PREFIX,
+    CELERY_BROKER_SOCKET_TIMEOUT,
     LLM_MODEL,
     RECOMMEND_CANDIDATE_LIMIT,
+    RECOMMEND_CHECKPOINT_BACKEND,
     RECOMMEND_CHECKPOINT_DB,
+    RECOMMEND_CHECKPOINT_REDIS_URL,
+    RECOMMEND_CHECKPOINT_SQLITE_FALLBACK,
+    RECOMMEND_CHECKPOINT_TTL_MINUTES,
     RECOMMEND_GRAPH_RECURSION_LIMIT,
     RECOMMEND_LLM_MAX_TOKENS,
     RECOMMEND_LLM_REPAIR_MAX_TOKENS,
     RECOMMEND_LLM_REPAIR_RETRIES,
     RECOMMEND_LLM_TIMEOUT,
+    RECOMMEND_REDIS_MAX_CONNECTIONS,
     RECOMMEND_TOOL_MAX_ROUNDS,
 )
 from backend.prompts.registry import get_prompt, prompt_trace
@@ -1122,9 +1130,7 @@ def create_recommendation_graph(checkpointer=None):
     return builder.compile(checkpointer=checkpointer)
 
 
-@lru_cache(maxsize=1)
-def _get_recommendation_checkpointer() -> SqliteSaver:
-    """进程内复用一个 SQLite Checkpointer 连接保存图状态。"""
+def _sqlite_recommendation_checkpointer() -> SqliteSaver:
     parent = os.path.dirname(RECOMMEND_CHECKPOINT_DB)
     if parent:
         os.makedirs(parent, exist_ok=True)
@@ -1133,6 +1139,71 @@ def _get_recommendation_checkpointer() -> SqliteSaver:
         check_same_thread=False,
     )
     return SqliteSaver(connection)
+
+
+@lru_cache(maxsize=1)
+def _get_recommendation_checkpointer():
+    """Redis 为默认 Checkpointer；仅显式配置或开发降级时使用 SQLite。"""
+    if RECOMMEND_CHECKPOINT_BACKEND == "sqlite":
+        return _sqlite_recommendation_checkpointer()
+
+    checkpointer = None
+    try:
+        checkpoint_prefix = "checkpoint"
+        checkpoint_write_prefix = "checkpoint_write"
+        if AGENT_REDIS_KEY_PREFIX:
+            checkpoint_prefix = f"{AGENT_REDIS_KEY_PREFIX}:checkpoint"
+            checkpoint_write_prefix = f"{AGENT_REDIS_KEY_PREFIX}:checkpoint_write"
+        checkpointer = RedisSaver(
+            redis_url=RECOMMEND_CHECKPOINT_REDIS_URL,
+            connection_args={
+                "socket_connect_timeout": CELERY_BROKER_SOCKET_TIMEOUT,
+                "socket_timeout": CELERY_BROKER_SOCKET_TIMEOUT,
+                "max_connections": RECOMMEND_REDIS_MAX_CONNECTIONS,
+            },
+            ttl={
+                "default_ttl": RECOMMEND_CHECKPOINT_TTL_MINUTES,
+                "refresh_on_read": True,
+            },
+            checkpoint_prefix=checkpoint_prefix,
+            checkpoint_write_prefix=checkpoint_write_prefix,
+        )
+        checkpointer.setup()
+        return checkpointer
+    except Exception as exc:
+        redis_client = getattr(checkpointer, "_redis", None)
+        if redis_client is not None:
+            redis_client.close()
+            pool = getattr(redis_client, "connection_pool", None)
+            if pool is not None:
+                pool.disconnect()
+        if not RECOMMEND_CHECKPOINT_SQLITE_FALLBACK:
+            raise RuntimeError(
+                "Redis recommendation Checkpointer initialization failed"
+            ) from exc
+        logger.warning(
+            "Redis recommendation Checkpointer unavailable; using SQLite development fallback: %s",
+            type(exc).__name__,
+        )
+        return _sqlite_recommendation_checkpointer()
+
+
+def close_recommendation_checkpointer() -> None:
+    """关闭当前进程缓存的 Redis/SQLite Checkpointer 连接。"""
+    if not _get_recommendation_checkpointer.cache_info().currsize:
+        return
+    checkpointer = _get_recommendation_checkpointer()
+    connection = getattr(checkpointer, "conn", None)
+    if connection is not None:
+        connection.close()
+    redis_client = getattr(checkpointer, "_redis", None)
+    if redis_client is not None:
+        redis_client.close()
+        pool = getattr(redis_client, "connection_pool", None)
+        if pool is not None:
+            pool.disconnect()
+    build_recommendation_graph.cache_clear()
+    _get_recommendation_checkpointer.cache_clear()
 
 
 @lru_cache(maxsize=1)

@@ -43,6 +43,7 @@ models/saved/
 *.log
 *.tmp
 *.temp
+celerybeat-schedule.*
 
 # Editor and operating-system files
 .idea/

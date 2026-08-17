@@ -169,6 +169,11 @@ def start_fastapi(host="0.0.0.0", port=5000, debug=False):
     npm run dev
 {CYAN}  前端访问地址: http://localhost:3000{RESET}
 
+{CYAN}  Agent Worker + Beat（另开三个终端，Redis 需已启动）：{RESET}
+    celery -A backend.celery_app:celery_app worker -Q agent.recommendation,agent.control -P threads --concurrency=2 -n recommend-local
+    celery -A backend.celery_app:celery_app worker -Q agent.opinion -P threads --concurrency=2 -n opinion-local
+    celery -A backend.celery_app:celery_app beat -l info
+
   按 Ctrl+C 停止服务
 """)
     try:

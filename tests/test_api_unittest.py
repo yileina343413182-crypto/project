@@ -140,7 +140,7 @@ class ApiSmokeTest(unittest.TestCase):
             for method in item
             if method in {"get", "post", "delete", "put", "patch"}
         ]
-        self.assertEqual(len(operations), 31)
+        self.assertEqual(len(operations), 34)
 
 
 if __name__ == "__main__":

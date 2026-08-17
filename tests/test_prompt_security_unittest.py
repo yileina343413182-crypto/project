@@ -20,6 +20,7 @@ from backend.agents.recommend_graph import (
     inspect_user_input,
     run_recommendation_graph,
 )
+from backend.agents.schemas import RECOMMEND_REASON_MIN_CHARS
 
 
 class FakeStructuredSecurityModel:
@@ -35,7 +36,7 @@ class FakeStructuredSecurityModel:
             "recommendations": [
                 {
                     "anime_id": 1,
-                    "reason": "符合现有偏好",
+                    "reason": "理" * RECOMMEND_REASON_MIN_CHARS,
                     "match_tags": [],
                     "evidence_refs": [],
                 }

@@ -267,9 +267,10 @@ RECOMMEND_LLM_REPAIR_RETRIES = _get_int_env(
     "RECOMMEND_LLM_REPAIR_RETRIES",
     1,
 )
-RECOMMEND_LLM_MAX_TOKENS = _get_int_env("RECOMMEND_LLM_MAX_TOKENS", 800)
-RECOMMEND_LLM_REPAIR_MAX_TOKENS = _get_int_env("RECOMMEND_LLM_REPAIR_MAX_TOKENS", 500)
-RECOMMEND_LLM_TIMEOUT = _get_int_env("RECOMMEND_LLM_TIMEOUT", 20)
+RECOMMEND_LLM_MAX_TOKENS = _get_int_env("RECOMMEND_LLM_MAX_TOKENS", 2800)
+RECOMMEND_LLM_REPAIR_MAX_TOKENS = _get_int_env("RECOMMEND_LLM_REPAIR_MAX_TOKENS", 2800)
+RECOMMEND_FOLLOWUP_MAX_TOKENS = _get_int_env("RECOMMEND_FOLLOWUP_MAX_TOKENS", 2200)
+RECOMMEND_LLM_TIMEOUT = _get_int_env("RECOMMEND_LLM_TIMEOUT", 60)
 RECOMMEND_PROMPT_MAX_CHARS = _get_int_env("RECOMMEND_PROMPT_MAX_CHARS", 6000)
 RECOMMEND_TOOL_MAX_ROUNDS = _get_int_env("RECOMMEND_TOOL_MAX_ROUNDS", 3)
 RECOMMEND_GRAPH_RECURSION_LIMIT = _get_int_env("RECOMMEND_GRAPH_RECURSION_LIMIT", 30)
@@ -277,6 +278,102 @@ RECOMMEND_CHECKPOINT_DB = os.environ.get(
     "RECOMMEND_CHECKPOINT_DB",
     os.path.join(PROJECT_ROOT, "data", "langgraph_checkpoints.db"),
 ).strip()
+REDIS_URL = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379/0").strip()
+AGENT_REDIS_KEY_PREFIX = os.environ.get(
+    "AGENT_REDIS_KEY_PREFIX",
+    "anime-agent",
+).strip().strip(":")
+RECOMMEND_CHECKPOINT_BACKEND = os.environ.get(
+    "RECOMMEND_CHECKPOINT_BACKEND",
+    "redis",
+).strip().lower()
+if RECOMMEND_CHECKPOINT_BACKEND not in {"redis", "sqlite"}:
+    raise RuntimeError("RECOMMEND_CHECKPOINT_BACKEND must be 'redis' or 'sqlite'")
+RECOMMEND_CHECKPOINT_REDIS_URL = os.environ.get(
+    "RECOMMEND_CHECKPOINT_REDIS_URL",
+    REDIS_URL,
+).strip()
+RECOMMEND_CHECKPOINT_SQLITE_FALLBACK = _get_bool_env(
+    "RECOMMEND_CHECKPOINT_SQLITE_FALLBACK",
+    DEBUG,
+)
+RECOMMEND_CHECKPOINT_TTL_MINUTES = max(
+    1,
+    _get_int_env("RECOMMEND_CHECKPOINT_TTL_MINUTES", 1440),
+)
+RECOMMEND_REDIS_MAX_CONNECTIONS = max(
+    1,
+    _get_int_env("RECOMMEND_REDIS_MAX_CONNECTIONS", 4),
+)
+
+# ===== Agent Celery / Redis 分布式并发配置 =====
+
+# 保留 M1 的并发变量作为 Celery Worker 部署参数；队列本身不再驻留在 API 进程。
+# 同一会话仍由数据库事务中的活动任务检查严格串行化。
+AGENT_PARALLEL_ENABLED = _get_bool_env("AGENT_PARALLEL_ENABLED", True)
+AGENT_MAX_CONCURRENT = max(
+    1,
+    _get_int_env(
+        "AGENT_MAX_CONCURRENT",
+        _get_int_env("AGENT_TASK_WORKERS", 4),
+    ),
+)
+RECOMMEND_AGENT_MAX_CONCURRENT = max(
+    1,
+    _get_int_env("RECOMMEND_AGENT_MAX_CONCURRENT", 2),
+)
+OPINION_AGENT_MAX_CONCURRENT = max(
+    1,
+    _get_int_env("OPINION_AGENT_MAX_CONCURRENT", 2),
+)
+CELERY_BROKER_URL = os.environ.get(
+    "CELERY_BROKER_URL",
+    REDIS_URL,
+).strip()
+CELERY_RESULT_BACKEND = os.environ.get(
+    "CELERY_RESULT_BACKEND",
+    REDIS_URL,
+).strip()
+CELERY_STORE_RESULTS = _get_bool_env("CELERY_STORE_RESULTS", False)
+CELERY_BROKER_POOL_LIMIT = max(
+    1,
+    _get_int_env("CELERY_BROKER_POOL_LIMIT", 3),
+)
+CELERY_REDIS_MAX_CONNECTIONS = max(
+    1,
+    _get_int_env("CELERY_REDIS_MAX_CONNECTIONS", 6),
+)
+CELERY_VISIBILITY_TIMEOUT = max(
+    300,
+    _get_int_env("CELERY_VISIBILITY_TIMEOUT", 3600),
+)
+CELERY_RESULT_EXPIRES = max(
+    300,
+    _get_int_env("CELERY_RESULT_EXPIRES", 86400),
+)
+CELERY_BROKER_SOCKET_TIMEOUT = max(
+    1,
+    _get_int_env("CELERY_BROKER_SOCKET_TIMEOUT", 5),
+)
+AGENT_TASK_LEASE_SECONDS = max(
+    60,
+    _get_int_env("AGENT_TASK_LEASE_SECONDS", 180),
+)
+AGENT_TASK_HEARTBEAT_SECONDS = max(
+    5,
+    min(
+        _get_int_env("AGENT_TASK_HEARTBEAT_SECONDS", 30),
+        AGENT_TASK_LEASE_SECONDS // 2,
+    ),
+)
+AGENT_TASK_QUEUE_STALE_SECONDS = max(
+    60,
+    _get_int_env("AGENT_TASK_QUEUE_STALE_SECONDS", 300),
+)
+AGENT_TASK_RECOVERY_INTERVAL_SECONDS = max(
+    60,
+    _get_int_env("AGENT_TASK_RECOVERY_INTERVAL_SECONDS", 120),
+)
 
 # ===== JWT 认证配置 =====
 JWT_SECRET_KEY = os.environ.get("JWT_SECRET_KEY", "").strip()

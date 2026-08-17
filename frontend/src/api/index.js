@@ -110,16 +110,21 @@ export function deleteChatHistory(id) {
 
 // ===== Agent Center API =====
 
-export function analyzeOpinionAgent(payload) {
-  return api.post('/agent/opinion/analyze', payload)
+export function createAgentRequestId() {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID()
+  return `agent-${Date.now()}-${Math.random().toString(16).slice(2)}`
 }
 
-export function startRecommendationAgent(query) {
-  return api.post('/agent/recommend/start', { query })
+export function analyzeOpinionAgent(payload, clientRequestId = createAgentRequestId()) {
+  return api.post('/agent/opinion/analyze', { ...payload, client_request_id: clientRequestId })
 }
 
-export function sendRecommendationAgentMessage(session_id, message) {
-  return api.post('/agent/recommend/message', { session_id, message })
+export function startRecommendationAgent(query, clientRequestId = createAgentRequestId()) {
+  return api.post('/agent/recommend/start', { query, client_request_id: clientRequestId })
+}
+
+export function sendRecommendationAgentMessage(session_id, message, clientRequestId = createAgentRequestId()) {
+  return api.post('/agent/recommend/message', { session_id, message, client_request_id: clientRequestId })
 }
 
 export function getAgentTask(taskId) {
@@ -136,6 +141,18 @@ export function getAgentSession(sessionId) {
 
 export function deleteAgentSession(sessionId) {
   return api.delete(`/agent/sessions/${sessionId}`)
+}
+
+export function getWatchGuides(page = 1, page_size = 50) {
+  return api.get('/agent/watch-guides', { params: { page, page_size } })
+}
+
+export function getWatchGuide(guideId) {
+  return api.get(`/agent/watch-guides/${guideId}`)
+}
+
+export function deleteWatchGuide(guideId) {
+  return api.delete(`/agent/watch-guides/${guideId}`)
 }
 
 // ===== RAG / PromptOps API =====

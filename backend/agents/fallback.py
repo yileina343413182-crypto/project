@@ -11,6 +11,8 @@ from backend.agents.schemas import (
     AgentStep,
     AnimeRecommendation,
     OpinionReportSchema,
+    RECOMMEND_REASON_MAX_CHARS,
+    RECOMMEND_REASON_MIN_CHARS,
     RecommendationEvidence,
     RecommendationResponseSchema,
 )
@@ -25,6 +27,97 @@ def _sentiment_line(stats: dict) -> str:
     neu = stats.get("neutral", 0)
     neg = stats.get("negative", 0)
     return f"共分析 {total} 条已标注评论，正向 {pos} 条，中性 {neu} 条，负向 {neg} 条。"
+
+
+def _limited_text(value: object, limit: int) -> str:
+    """限制本地字段长度，防止异常元数据挤占推荐理由。"""
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
+def _preference_line(preferences: dict) -> str:
+    labels = (
+        ("preferred_genres", "题材"),
+        ("preferred_moods", "氛围"),
+        ("likes", "看重"),
+        ("dislikes", "避开"),
+    )
+    parts = []
+    for key, label in labels:
+        values = preferences.get(key) or []
+        if not isinstance(values, list):
+            values = [values]
+        cleaned = [_limited_text(value, 12) for value in values[:3] if str(value or "").strip()]
+        if cleaned:
+            parts.append(f"{label}{'、'.join(cleaned)}")
+    return _limited_text("；".join(parts), 40) or "当前没有可安全引用的结构化偏好"
+
+
+def _fallback_recommendation_reason(item: dict, preferences: dict) -> str:
+    """仅依据候选元数据生成满足长度契约的本地推荐说明。"""
+    name = _limited_text(item.get("name") or "这部作品", 30)
+    topics = [
+        _limited_text(topic, 16)
+        for topic in (item.get("topics") or [])[:3]
+        if str(topic or "").strip()
+    ]
+    topic_line = _limited_text(
+        f"现有主题关键词为{'、'.join(topics)}" if topics else "当前未形成稳定主题关键词",
+        40,
+    )
+
+    stats = item.get("sentiment") or {}
+    total = int(stats.get("total") or 0)
+    if total > 0:
+        positive = int(stats.get("positive") or 0)
+        neutral = int(stats.get("neutral") or 0)
+        negative = int(stats.get("negative") or 0)
+        positive_rate = positive / total * 100
+        sentiment_line = (
+            f"现有{total}条情感样本，正向{positive}条、中性{neutral}条、"
+            f"负向{negative}条，正向占比约{positive_rate:.1f}%"
+        )
+    else:
+        sentiment_line = "当前没有可用的情感统计样本"
+    sentiment_line = _limited_text(sentiment_line, 55)
+
+    try:
+        score = float(item.get("final_score", item.get("score", 0)) or 0)
+        score_text = f"{score:.3f}"
+    except (TypeError, ValueError):
+        score_text = "未提供"
+    platform = _limited_text(item.get("platform"), 24)
+    platform_line = (
+        f"本地资料记录为{platform}，实际版权与地区可用性请在播放前核对"
+        if platform
+        else "本地资料未记录明确平台，请通过正规版权渠道查询"
+    )
+
+    reason = (
+        f"《{name}》进入本次推荐，是因为本地排序综合参考了需求匹配、已有偏好、"
+        f"评论口碑与样本热度，综合得分为{score_text}。"
+        f"偏好匹配：{_preference_line(preferences)}；{topic_line}。"
+        "它们仅用于限定筛选方向，不代表对剧情的额外推断。"
+        f"口碑依据：{sentiment_line}。统计只反映当前收录样本，不能替代完整观众评价。"
+        "核心看点：可先观察上述主题、角色推进与整体节奏是否符合预期；"
+        "降级模式不会补写数据库没有的设定。"
+        "适合观看场景：建议先试看一至两集，再按实际节奏和情绪体验决定是否继续。"
+        "相近作品类比：当前没有可靠映射，因此不编造片名。"
+        f"观看平台建议：{platform_line}。"
+        "劝退点：本次结论主要依据有限评论和结构化统计；若在意画风、结局、CP关系或"
+        "特定雷点，现有证据无法保证，开看前应核对作品简介和近期评论。"
+    ).strip()
+    if len(reason) > RECOMMEND_REASON_MAX_CHARS:
+        prefix = reason[:RECOMMEND_REASON_MAX_CHARS]
+        boundary = max(prefix.rfind(mark) for mark in "。！？")
+        reason = (
+            prefix[: boundary + 1]
+            if boundary + 1 >= RECOMMEND_REASON_MIN_CHARS
+            else prefix[: RECOMMEND_REASON_MAX_CHARS - 1].rstrip("，；、 ") + "。"
+        )
+    return reason
 
 
 def build_opinion_fallback(anime: dict, stats: dict, topics: list, comments: dict, aspect: dict) -> OpinionReportSchema:
@@ -90,7 +183,7 @@ def build_recommendation_fallback(query: str, candidates: list, preferences: dic
             name=item.get("name", ""),
             platform=item.get("platform", ""),
             comment_count=item.get("comment_count", 0),
-            reason=f"根据你的描述和本地评论数据，{item.get('name', '这部作品')} 与当前偏好较匹配，且样本评论量较高。",
+            reason=_fallback_recommendation_reason(item, preferences),
             match_tags=item.get("match_tags", ["本地匹配", "评论证据"]),
             evidence=evidence,
         ))

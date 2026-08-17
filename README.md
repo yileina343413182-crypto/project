@@ -10,8 +10,9 @@
 > `backend/prompts/templates/*.yaml` 形式的旧平铺模板。Prompt 的版本、模板哈希和
 > 安全诊断会随 Agent 任务写入 `prompt_trace`。
 >
-> 当前业务持久化已统一到 SQLAlchemy 2.0 的 16 张 ORM 表。生产/本机运行优先
+> 当前业务持久化已统一到 SQLAlchemy 2.0 的 17 张 ORM 表。生产/本机运行优先
 > 使用 MySQL；SQLite 保留为迁移源、测试隔离数据库和未配置 MySQL 时的兼容后端。
+> Agent 后台任务由 Redis + Celery Worker 执行，推荐图 Checkpoint 生产环境使用 Redis。
 
 ---
 
@@ -101,7 +102,7 @@
 | **主题挖掘** | LDA 主题建模（默认 8 个主题），支持困惑度/一致性自动调参；TF-IDF / TextRank 关键词提取 | gensim |
 | **可视化看板** | 情感分布饼图、逐条情感趋势折线图、评论词云、LDA 主题卡片、评论列表（分页+情感过滤） | Vue 3 + ECharts 5 + echarts-wordcloud |
 | **用户系统** | 注册/登录、JWT Token 认证、bcrypt 密码哈希、聊天历史持久化 | PyJWT + bcrypt |
-| **Agent 中心** | 舆情诊断、多轮偏好推荐、会话/任务持久化、执行步骤和证据追踪 | LangGraph + LangChain + Pydantic |
+| **Agent 中心** | 舆情诊断、多轮偏好推荐、跨进程并行、会话/任务持久化、崩溃重投递幂等、执行步骤和证据追踪 | LangGraph + Celery + Redis |
 | **混合 RAG** | Chroma 向量召回与数据库关键词召回并行执行，RRF 融合后可选百炼 Rerank；索引不可用时降级到实时业务表 | Chroma + SQLAlchemy + qwen3-rerank |
 | **AI 推荐** | 保留传统单轮推荐；Agent 2.0 通过偏好问卷、候选池、受限只读工具和结构化校验生成可追溯推荐 | OpenAI 兼容接口（Qwen / OpenAI / 智谱） |
 | **REST API** | 统一 JSON 格式 `{"code":200,"msg":"...","data":{...}}`，完整的错误码体系 | FastAPI APIRouter |
@@ -128,11 +129,13 @@
 | PyTorch | 2.11.0 | TextCNN / BERT 训练与推理 |
 | transformers | 4.46.3 | bert-base-chinese 预训练模型 |
 | gensim | 4.4.0 | LDA 主题建模 |
-| SQLAlchemy | 2.0.51 | 16 表统一 ORM、同步/异步事务边界 |
+| SQLAlchemy | 2.0.51 | 17 表统一 ORM、同步/异步事务边界 |
 | MySQL | 8.0+ | 默认业务数据库（PyMySQL + aiomysql） |
 | SQLite | 内置 | 迁移源、测试隔离与兼容回退 |
 | Alembic | 1.18.5 | MySQL Schema 迁移 |
 | LangGraph | 1.0.10 | 推荐 Agent 状态图与 Checkpoint |
+| Celery | 5.6.2 | 推荐/舆情 Agent 分布式任务执行 |
+| Redis | 8.0+ | Celery broker/result backend 与生产 Checkpointer |
 | Chroma | 0.5.23 | 可重建向量索引 |
 
 ### 4.2 前端
@@ -321,7 +324,7 @@
 
 ### 10.1 应用架构（`backend/app.py`）
 
-采用 FastAPI **应用工厂模式**（`create_app()`），通过 8 个 `APIRouter` 注册接口并统一配置 CORS、JWT、生命周期和错误响应。请求侧数据库访问使用异步 `AsyncSession`；Agent、爬虫、训练和 RAG 索引使用同步 Session。业务数据库优先使用 MySQL，LangGraph Checkpointer 单独保存在 SQLite 文件中，首轮部署固定单 Uvicorn worker。
+采用 FastAPI **应用工厂模式**（`create_app()`），通过 8 个 `APIRouter` 注册接口并统一配置 CORS、JWT、生命周期和错误响应。请求侧数据库访问使用异步 `AsyncSession`；Agent、爬虫、训练和 RAG 索引使用同步 Session。业务数据库优先使用 MySQL；Agent 任务由 Redis + Celery Worker 执行，LangGraph Checkpointer 生产使用 Redis，因此 FastAPI 与 Agent Worker 可独立扩展。SQLite Checkpointer 仅作为开发降级。
 
 ### 10.2 API 端点一览
 
@@ -361,10 +364,13 @@
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | POST | `/api/recommend` | `{"query":"用户输入"}` → 动漫推荐卡片 + LLM 生成理由 |
-| POST | `/api/agent/recommend/start` | 启动推荐 Agent 2.0 异步会话 |
-| POST | `/api/agent/recommend/message` | 回答多级偏好问题或继续推荐会话 |
+| POST | `/api/agent/recommend/start` | 启动推荐 Agent 2.0 异步会话；支持 `client_request_id` 幂等键 |
+| POST | `/api/agent/recommend/message` | 回答多级偏好问题；推荐完成后继续普通文本追问；同一会话严格串行 |
 | GET | `/api/agent/tasks/<task_id>` | 查询异步任务状态与结果 |
-| POST | `/api/agent/opinion/analyze` | 启动舆情诊断 Agent |
+| POST | `/api/agent/opinion/analyze` | 启动舆情诊断 Agent；支持 `client_request_id` 幂等键 |
+| GET | `/api/agent/watch-guides` | 分页读取当前用户的待看番剧指南摘要 |
+| GET | `/api/agent/watch-guides/<guide_id>` | 读取当前用户的一份完整观看指南 |
+| DELETE | `/api/agent/watch-guides/<guide_id>` | 删除当前用户的一份观看指南 |
 
 #### RAG 与 PromptOps（`/api/rag`，均需 JWT）
 
@@ -493,6 +499,7 @@ flowchart LR
     H --> J["结构化生成与校验"]
     J -->|失败| K["修复或本地降级"]
     J -->|成功| L["返回推荐结果"]
+    L --> M["后续追问返回详细普通文本"]
 ```
 
 关键约束：
@@ -501,11 +508,21 @@ flowchart LR
 - `RECOMMEND_TOOLS` 仅包含当前候选池内的只读查询工具，由
   `bind_tools + ToolNode` 执行。
 - `step_count`、`retry_count`、工具轮次和 `recursion_limit` 共同限制循环。
-- 独立 SQLite Checkpointer 保存图节点状态；它不属于 MySQL 的 16 张业务表。
+- Redis Checkpointer 保存生产图节点状态；开发可降级到独立 SQLite 文件，它们都不属于 MySQL 的 17 张业务表。
 - 高风险 Prompt 注入输入不触发工具规划，也不能写入持久化偏好。
 - LLM 产生的偏好只作为 `suggested` 返回；只有确定性解析结果可以写入
   `applied` 偏好。
 - LLM 或证据检索异常均进入可观测的本地降级路径。
+- 会话出现成功推荐前，追加消息继续走偏好澄清/结构化推荐；成功推荐后的消息
+  只读取最近对话和最后一次推荐摘要，返回非结构化详细文本，不调用推荐工具或写入偏好。
+- 用户首次追问一部可唯一确定的动画后，系统会询问是否生成待看指南；只有紧邻该询问的
+  明确肯定回复才会生成并保存，同一会话不会对同一作品重复询问。
+- 不同会话以及推荐/舆情 Agent 可由多个 Celery Worker 并行执行；同一会话通过数据库事务和
+  活动任务检查保持严格串行。前端切换会话不会停止后台任务，重新进入会自动恢复轮询。
+- Celery 任务使用 SQL 租约、心跳、late ack 和 `source_task_id` 唯一消息键；Worker 崩溃后的
+  重投递不会生成第二条回答，Worker 启动会恢复遗留任务。
+- Agent 写接口接受可选的 `client_request_id`（1～64 字符）；前端默认发送 UUID，重复请求
+  返回原 `task_id`，不会重复创建消息或调用模型。`turn_seq` 记录会话内任务顺序。
 
 ### 13.2 PromptOps 与 LLM 接入
 
@@ -553,12 +570,12 @@ Prompt 版本管理细节见
 `DATABASE_URL` 或 `MYSQL_*` 环境变量构造 MySQL 连接；未配置 MySQL 时才使用
 `data/anime_sentiment.db` 作为 SQLite 兼容后端。
 
-ORM 共包含 16 张业务表：
+ORM 共包含 17 张业务表：
 
 | 分组 | 数据表 | 主要用途 |
 |------|--------|----------|
 | 核心业务 | `users`、`anime`、`comments`、`topics`、`chat_history` | 用户、动漫、评论情感、LDA 主题和传统聊天历史 |
-| Agent | `agent_sessions`、`agent_messages`、`agent_tasks`、`user_preferences` | Agent 会话、多轮消息、后台任务和长期偏好 |
+| Agent | `agent_sessions`、`agent_messages`、`agent_tasks`、`user_preferences`、`watch_guides` | Agent 会话、多轮消息、后台任务、长期偏好和用户待看指南 |
 | RAG | `rag_index_jobs`、`rag_documents`、`rag_active_collections`、`rag_collection_metadata` | 索引任务、可检索文档、活动集合和 Embedding 元数据 |
 | RAG 评估 | `rag_eval_cases`、`rag_eval_runs`、`rag_eval_items` | 评估用例、运行记录、指标和证据 |
 
@@ -568,7 +585,10 @@ ORM 共包含 16 张业务表：
 - `comments.sentiment_score` 和 `topics.weight` 在 MySQL 使用 `DOUBLE`，避免从 SQLite `REAL` 迁移时损失精度。
 - `PortableDateTime` 在 MySQL 使用原生 `DATETIME`，同时兼容旧 SQLite 文本时间。
 - 外键统一使用级联或置空策略，并为评论查询、任务状态和 RAG 集合建立索引。
-- LangGraph Checkpoint 使用 `data/langgraph_checkpoints.db`，不属于上述 16 张业务表。
+- `agent_tasks.client_request_id` 防止客户端重试重复创建任务，`turn_seq` 保证会话内轮次有序；
+  两个唯一索引均允许旧任务保留空值。
+- LangGraph Checkpoint 生产使用 Redis；开发可显式使用 `data/langgraph_checkpoints.db`，
+  两者都不属于上述 17 张业务表。
 
 MySQL Schema 由 Alembic 管理；SQLite → MySQL 的一次性迁移和全量校验脚本位于
 `scripts/migrate_sqlite_to_mysql.py` 与 `scripts/verify_mysql_migration.py`。
@@ -642,7 +662,7 @@ project/
 │   ├── config.py                   # 全局配置（DB路径、端口、LLM Key、JWT密钥）
 │   ├── security.py                 # HS256 JWT 签发与认证依赖
 │   ├── database.py                 # 同步业务查询兼容入口
-│   ├── db/                         # 16 表 ORM、同步/异步 Session 与 Repository
+│   ├── db/                         # 17 表 ORM、同步/异步 Session 与 Repository
 │   ├── api/
 │   │   ├── auth.py                 # POST /register /login, GET /me（JWT 保护）
 │   │   ├── data.py                 # GET /anime/list, GET /comments/<id>（分页+情感过滤）
@@ -803,11 +823,24 @@ $env:EMBEDDING_API_KEY="your-key"
 $env:RERANK_PROVIDER="qwen"
 $env:RERANK_WORKSPACE_ID="your-workspace-id"
 $env:RERANK_MODEL="qwen3-rerank"
+$env:AGENT_PARALLEL_ENABLED="true"
+$env:AGENT_MAX_CONCURRENT="4"
+$env:RECOMMEND_AGENT_MAX_CONCURRENT="2"
+$env:OPINION_AGENT_MAX_CONCURRENT="2"
+$env:REDIS_URL="redis://127.0.0.1:6379/0"
+$env:CELERY_RESULT_BACKEND=$env:REDIS_URL
+$env:AGENT_REDIS_KEY_PREFIX="anime-agent-local"
+$env:RECOMMEND_CHECKPOINT_BACKEND="redis"
 ```
 
 未配置 LLM 或 Embedding Key 时，推荐与 RAG 分别降级为本地推荐和数据库
 关键词检索。未配置百炼 Rerank 或调用失败时，混合检索保留 RRF 融合顺序。
 启用百炼 Rerank 后，融合候选文本会发送到对应百炼业务空间进行精排。
+
+Agent 并发由推荐/舆情两个 Celery 队列的 Worker concurrency 控制；正式并发运行应使用
+MySQL 和 Redis 8。完整启动、恢复和生产部署说明见
+[`docs/agent-celery-redis.md`](docs/agent-celery-redis.md)；不安装 Docker 的个人开发/答辩环境
+可按 [`docs/redis-cloud-free.md`](docs/redis-cloud-free.md) 接入 Redis Cloud Free。
 
 ### 4. 安装前端依赖
 
@@ -962,11 +995,11 @@ python -m topic.lda_model --anime_id 1 --find_best --min_topics 3 --max_topics 1
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| POST | `/api/agent/opinion/analyze` | 创建舆情诊断后台任务 |
-| POST | `/api/agent/recommend/start` | 创建推荐 Agent 2.0 会话与任务 |
-| POST | `/api/agent/recommend/message` | 向推荐会话追加消息 |
+| POST | `/api/agent/opinion/analyze` | 创建舆情诊断后台任务；支持 `client_request_id` 幂等键 |
+| POST | `/api/agent/recommend/start` | 创建推荐 Agent 2.0 会话与任务；支持 `client_request_id` 幂等键 |
+| POST | `/api/agent/recommend/message` | 向推荐会话追加消息；同一会话严格串行 |
 | GET | `/api/agent/tasks/<task_id>` | 查询 Agent 任务状态与结果 |
-| GET/DELETE | `/api/agent/sessions[/<session_id>]` | 查询或删除当前用户的 Agent 会话 |
+| GET/DELETE | `/api/agent/sessions[/<session_id>]` | 查询或删除会话；查询含 `active_task`，运行中会话禁止删除 |
 | POST | `/api/rag/index/rebuild` | 重建全量 RAG 索引 |
 | GET | `/api/rag/index/status` | 查询关系文档、Embedding、Chroma 与 Rerank 状态 |
 | POST | `/api/rag/search` | 调试混合检索、RRF 和证据链 |
@@ -976,7 +1009,7 @@ python -m topic.lda_model --anime_id 1 --find_best --min_topics 3 --max_topics 1
 
 ## 数据库结构速览
 
-当前 Schema 为 MySQL 8 上的 16 张 SQLAlchemy 业务表；SQLite 保留相同映射以
+当前 Schema 为 MySQL 8 上的 17 张 SQLAlchemy 业务表；SQLite 保留相同映射以
 支持迁移和测试。完整分组、兼容规则和迁移方式见[第 14 节](#14-数据库设计)，
 实际列定义以 `backend/db/models.py` 为准。
 
@@ -999,7 +1032,7 @@ python batch_predict.py --model bert --anime_id 1
 # 仅重新计算所有动漫的 LDA 主题
 python prepare_data.py --topics-only
 
-# 核验 SQLite → MySQL 的 16 表全量内容
+# 核验 SQLite → MySQL 的 17 表全量内容
 python scripts/verify_mysql_migration.py
 
 # 重建 RAG 索引

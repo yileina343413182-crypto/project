@@ -8,7 +8,7 @@ import unittest
 os.environ["LLM_API_KEY"] = ""
 os.environ["EMBEDDING_API_KEY"] = ""
 
-from tests.api_test_support import open_test_client
+from tests.api_test_support import open_test_celery_worker, open_test_client
 from backend.rag.embeddings import embedding_status
 
 
@@ -16,6 +16,8 @@ class RagApiSmokeTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.client_context, cls.client = open_test_client()
+        cls.worker_context = open_test_celery_worker()
+        cls.worker_context.__enter__()
         username = f"rag{time.time_ns() % 100000000}"
         resp = cls.client.post("/api/auth/register", json={"username": username, "password": "password123"})
         payload = resp.json()
@@ -24,6 +26,7 @@ class RagApiSmokeTest(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
+        cls.worker_context.__exit__(None, None, None)
         cls.client_context.__exit__(None, None, None)
 
     def wait_for_task(self, task_id, timeout=15):

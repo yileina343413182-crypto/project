@@ -93,7 +93,10 @@ async function waitJob(jobId) {
   for (let i = 0; i < 60; i += 1) {
     const job = await getRagIndexJob(jobId)
     message.value = `索引任务 #${jobId}: ${job.current_step} ${job.progress}%`
-    if (job.status === 'succeeded' || job.status === 'failed') return job
+    if (job.status === 'failed') {
+      throw new Error(job.error || `索引任务 #${jobId} 失败`)
+    }
+    if (job.status === 'succeeded') return job
     await new Promise(resolve => setTimeout(resolve, 1000))
   }
   return null
@@ -154,4 +157,3 @@ h2 { font-size: 16px; color: var(--text-primary); }
 .error { color: var(--color-negative); }
 @media (max-width: 760px) { .search-row, .metrics { grid-template-columns: 1fr; } }
 </style>
-

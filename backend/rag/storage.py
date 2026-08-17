@@ -251,19 +251,20 @@ def upsert_documents(collection_name: str, docs: list[dict]) -> None:
         "metadata", "content_hash", "updated_at",
     )
     with orm_session() as session:
+        table = RagDocument.__table__
         if session.bind.dialect.name == "mysql":
-            statement = mysql_insert(RagDocument).values(values)
+            statement = mysql_insert(table).values(values)
             session.execute(
                 statement.on_duplicate_key_update(
-                    **{column: getattr(statement.inserted, column) for column in update_columns}
+                    **{column: statement.inserted[column] for column in update_columns}
                 )
             )
         else:
-            statement = sqlite_insert(RagDocument).values(values)
+            statement = sqlite_insert(table).values(values)
             session.execute(
                 statement.on_conflict_do_update(
-                    index_elements=[RagDocument.collection_name, RagDocument.doc_id],
-                    set_={column: getattr(statement.excluded, column) for column in update_columns},
+                    index_elements=[table.c.collection_name, table.c.doc_id],
+                    set_={column: statement.excluded[column] for column in update_columns},
                 )
             )
 

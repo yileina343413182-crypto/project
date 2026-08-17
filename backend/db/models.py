@@ -1,4 +1,4 @@
-"""16 张业务表的跨 MySQL/SQLite SQLAlchemy ORM 映射。
+"""17 张业务表的跨 MySQL/SQLite SQLAlchemy ORM 映射。
 
 LangGraph Checkpoint 使用独立数据库，不属于这份 ``Base.metadata``，因此
 业务表建表或迁移不会碰到工作流检查点。
@@ -163,7 +163,7 @@ class ChatHistory(Base):
     created_at: Mapped[datetime] = mapped_column(PORTABLE_DATETIME, nullable=False, server_default=func.now())
 
 
-# ===== Agent：会话、消息、后台任务和长期偏好 =====
+# ===== Agent：会话、消息、后台任务、长期偏好和待看指南 =====
 
 class AgentSession(Base):
     __tablename__ = "agent_sessions"
@@ -181,10 +181,31 @@ class AgentSession(Base):
     updated_at: Mapped[datetime] = mapped_column(PORTABLE_DATETIME, nullable=False, server_default=func.now())
 
 
+class WatchGuide(Base):
+    __tablename__ = "watch_guides"
+    __table_args__ = (
+        UniqueConstraint("user_id", "anime_key"),
+        Index("ix_watch_guides_user_id_created_at_id", "user_id", "created_at", "id"),
+        Index("ix_watch_guides_source_session_id", "source_session_id"),
+        MYSQL_TABLE_OPTIONS,
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    source_session_id: Mapped[int | None] = mapped_column(
+        ForeignKey("agent_sessions.id", ondelete="SET NULL")
+    )
+    anime_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    anime_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    guide_content: Mapped[str] = mapped_column(LONG_TEXT, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(PORTABLE_DATETIME, nullable=False, server_default=func.now())
+
+
 class AgentMessage(Base):
     __tablename__ = "agent_messages"
     __table_args__ = (
         Index("ix_agent_messages_session_id_id", "session_id", "id"),
+        Index("ux_agent_messages_source_task_id", "source_task_id", unique=True),
         MYSQL_TABLE_OPTIONS,
     )
 
@@ -193,13 +214,29 @@ class AgentMessage(Base):
     role: Mapped[str] = mapped_column(String(32), nullable=False)
     content: Mapped[str] = mapped_column(LONG_TEXT, nullable=False)
     message_metadata: Mapped[Any | None] = mapped_column("metadata", JSON)
+    source_task_id: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(PORTABLE_DATETIME, nullable=False, server_default=func.now())
 
 
 class AgentTask(Base):
     __tablename__ = "agent_tasks"
     __table_args__ = (
+        Index(
+            "ux_agent_tasks_user_agent_request",
+            "user_id",
+            "agent_type",
+            "client_request_id",
+            unique=True,
+        ),
+        Index(
+            "ux_agent_tasks_session_turn",
+            "session_id",
+            "turn_seq",
+            unique=True,
+        ),
         Index("ix_agent_tasks_user_session_status", "user_id", "session_id", "status"),
+        Index("ix_agent_tasks_status_lease_until", "status", "lease_until"),
+        Index("ix_agent_tasks_celery_task_id", "celery_task_id"),
         MYSQL_TABLE_OPTIONS,
     )
 
@@ -207,12 +244,24 @@ class AgentTask(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     session_id: Mapped[int] = mapped_column(ForeignKey("agent_sessions.id", ondelete="CASCADE"), nullable=False)
     agent_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    client_request_id: Mapped[str | None] = mapped_column(String(64))
+    turn_seq: Mapped[int | None] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued")
     input_data: Mapped[Any | None] = mapped_column("input", JSON)
     result: Mapped[Any | None] = mapped_column(JSON)
     error: Mapped[str | None] = mapped_column(LONG_TEXT)
     progress: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     current_step: Mapped[str] = mapped_column(String(128), nullable=False, default="queued")
+    celery_task_id: Mapped[str | None] = mapped_column(String(64))
+    worker_id: Mapped[str | None] = mapped_column(String(255))
+    lease_until: Mapped[datetime | None] = mapped_column(PORTABLE_DATETIME)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(PORTABLE_DATETIME)
+    attempt_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
     created_at: Mapped[datetime] = mapped_column(PORTABLE_DATETIME, nullable=False, server_default=func.now())
     started_at: Mapped[datetime | None] = mapped_column(PORTABLE_DATETIME)
     finished_at: Mapped[datetime | None] = mapped_column(PORTABLE_DATETIME)

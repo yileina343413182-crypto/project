@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import atexit
+import asyncio
 import os
 import shutil
 import sys
@@ -36,6 +37,9 @@ os.environ["DATABASE_PATH"] = _db_file.name
 os.environ["DATABASE_URL"] = _sync_url
 os.environ["ASYNC_DATABASE_URL"] = _async_url
 os.environ["RECOMMEND_CHECKPOINT_DB"] = _checkpoint_file.name
+os.environ["RECOMMEND_CHECKPOINT_BACKEND"] = "sqlite"
+os.environ["CELERY_BROKER_URL"] = "memory://"
+os.environ["CELERY_RESULT_BACKEND"] = "cache+memory://"
 for _name in (
     "LLM_API_KEY",
     "EMBEDDING_API_KEY",
@@ -58,14 +62,22 @@ _config.DATABASE_URL = _sync_url
 _config.ASYNC_DATABASE_URL = _async_url
 _config.DATABASE_IS_MYSQL = False
 _config.RECOMMEND_CHECKPOINT_DB = _checkpoint_file.name
+_config.RECOMMEND_CHECKPOINT_BACKEND = "sqlite"
+_config.CELERY_BROKER_URL = "memory://"
+_config.CELERY_RESULT_BACKEND = "cache+memory://"
 _config.RERANK_API_KEY = ""
 _db_session.DATABASE_URL = _sync_url
 _db_session.ASYNC_DATABASE_URL = _async_url
 if "backend.agents.recommend_graph" in sys.modules:
     _recommend_graph = sys.modules["backend.agents.recommend_graph"]
     _recommend_graph.RECOMMEND_CHECKPOINT_DB = _checkpoint_file.name
+    _recommend_graph.RECOMMEND_CHECKPOINT_BACKEND = "sqlite"
     _recommend_graph.build_recommendation_graph.cache_clear()
     _recommend_graph._get_recommendation_checkpointer.cache_clear()
+if "backend.celery_app" in sys.modules:
+    _celery_module = sys.modules["backend.celery_app"]
+    _celery_module.celery_app.conf.broker_url = "memory://"
+    _celery_module.celery_app.conf.result_backend = "cache+memory://"
 
 
 def _cleanup_file(path: str) -> None:
@@ -79,20 +91,28 @@ def _close_checkpoint_connection() -> None:
     try:
         from backend.agents import recommend_graph
 
-        if recommend_graph._get_recommendation_checkpointer.cache_info().currsize:
-            checkpointer = recommend_graph._get_recommendation_checkpointer()
-            connection = getattr(checkpointer, "conn", None)
-            if connection is not None:
-                connection.close()
-        recommend_graph.build_recommendation_graph.cache_clear()
-        recommend_graph._get_recommendation_checkpointer.cache_clear()
+        recommend_graph.close_recommendation_checkpointer()
     except (AttributeError, ImportError):
         pass
+
+
+def _dispose_database_engines() -> None:
+    """在删除 Windows 临时库前释放测试期间重建过的连接池。"""
+    try:
+        from backend.db.session import dispose_async_engines, dispose_sync_engines
+    except ImportError:
+        return
+    try:
+        asyncio.run(dispose_async_engines())
+    except RuntimeError:
+        pass
+    dispose_sync_engines()
 
 
 atexit.register(_cleanup_file, _checkpoint_file.name)
 atexit.register(_cleanup_file, _db_file.name)
 atexit.register(_close_checkpoint_connection)
+atexit.register(_dispose_database_engines)
 
 
 def open_test_client():
@@ -103,3 +123,18 @@ def open_test_client():
 
     context = TestClient(create_app())
     return context, context.__enter__()
+
+
+def open_test_celery_worker():
+    """返回消费 Agent 测试队列的嵌入式 Celery worker 上下文。"""
+    from celery.contrib.testing.worker import start_worker
+
+    from backend.celery_app import celery_app
+
+    return start_worker(
+        celery_app,
+        concurrency=4,
+        pool="threads",
+        perform_ping_check=False,
+        queues=("agent.recommendation", "agent.opinion", "agent.control"),
+    )

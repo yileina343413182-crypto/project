@@ -1,4 +1,4 @@
-"""Copy the 16 business tables from legacy SQLite into an empty MySQL schema.
+"""Copy the 17 business tables from legacy SQLite into an empty MySQL schema.
 
 The LangGraph checkpoint database is intentionally excluded. Run Alembic against
 the MySQL target before this script. The copy is one transaction and refuses a
@@ -26,6 +26,18 @@ from backend.config import DATABASE_URL, DB_PATH
 from backend.db.models import BUSINESS_TABLES, Base, PortableDateTime
 
 logger = logging.getLogger(__name__)
+_LEGACY_OPTIONAL_COLUMNS = {
+    "agent_messages": {"source_task_id"},
+    "agent_tasks": {
+        "client_request_id",
+        "turn_seq",
+        "celery_task_id",
+        "worker_id",
+        "lease_until",
+        "heartbeat_at",
+        "attempt_count",
+    },
+}
 _RELATIVE_TIME = re.compile(
     r"^\s*(?:(?P<days>\d+)d)?\s*(?:(?P<hours>\d+)h)?\s*"
     r"(?:(?P<minutes>\d+)m)?\s*ago\s*$",
@@ -37,9 +49,18 @@ class MigrationPreflightError(RuntimeError):
     """Raised before any target rows are written."""
 
 
-def _quoted_select(engine: Engine, table) -> str:
+def _quoted_select(engine: Engine, table, available_columns: set[str] | None = None) -> str:
     quote = engine.dialect.identifier_preparer.quote
-    columns = ", ".join(quote(column.name) for column in table.columns)
+    columns = ", ".join(
+        quote(column.name)
+        if available_columns is None or column.name in available_columns
+        else (
+            f"0 AS {quote(column.name)}"
+            if table.name == "agent_tasks" and column.name == "attempt_count"
+            else f"NULL AS {quote(column.name)}"
+        )
+        for column in table.columns
+    )
     primary_key = ", ".join(quote(column.name) for column in table.primary_key.columns)
     order_by = f" ORDER BY {primary_key}" if primary_key else ""
     return f"SELECT {columns} FROM {quote(table.name)}{order_by}"
@@ -100,7 +121,8 @@ def _validate_schema(source: Engine, target: Engine) -> None:
             continue
         actual = {column["name"] for column in source_inspector.get_columns(table.name)}
         expected = {column.name for column in table.columns}
-        missing_columns = sorted(expected - actual)
+        allowed_missing = _LEGACY_OPTIONAL_COLUMNS.get(table.name, set())
+        missing_columns = sorted(expected - actual - allowed_missing)
         if missing_columns:
             raise MigrationPreflightError(
                 f"Source table {table.name} is missing columns: {', '.join(missing_columns)}"
@@ -143,7 +165,13 @@ def migrate_business_tables(source: Engine, target: Engine, chunk_size: int = 10
             if not source_inspector.has_table(table.name):
                 expected_counts[table.name] = 0
                 continue
-            result = source_connection.exec_driver_sql(_quoted_select(source, table))
+            available_columns = {
+                column["name"]
+                for column in source_inspector.get_columns(table.name)
+            }
+            result = source_connection.exec_driver_sql(
+                _quoted_select(source, table, available_columns)
+            )
             count = 0
             while True:
                 rows = result.mappings().fetchmany(chunk_size)
@@ -169,7 +197,7 @@ def migrate_business_tables(source: Engine, target: Engine, chunk_size: int = 10
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="迁移 16 张业务表：SQLite -> 空 MySQL schema")
+    parser = argparse.ArgumentParser(description="迁移 17 张业务表：SQLite -> 空 MySQL schema")
     parser.add_argument("--source", default=DB_PATH, help="源 SQLite 文件路径")
     parser.add_argument(
         "--target-url",

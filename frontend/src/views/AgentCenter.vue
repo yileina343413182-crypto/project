@@ -6,21 +6,21 @@
     </nav>
 
     <section class="hero">
-      <p>LangChain Agent Center</p>
+      <p>Agent Center</p>
       <h1>智能体中心</h1>
-      <span>独立于原 AI 小助手的新功能模块，面向舆情诊断与偏好推荐。</span>
+      <span>面向舆情诊断与偏好推荐。</span>
     </section>
 
     <section class="agent-grid">
       <article class="agent-entry" @click="router.push('/agent/opinion')">
         <span class="entry-code">01</span>
-        <h2>舆情诊断 Agent</h2>
+        <h2>舆情诊断智能助手</h2>
         <p>自动调用情感、主题、词云、代表评论和 Bangumi 信息，生成结构化舆情报告。</p>
         <button>进入诊断</button>
       </article>
       <article class="agent-entry" @click="router.push('/agent/recommendation')">
         <span class="entry-code">02</span>
-        <h2>推荐 Agent 2.0</h2>
+        <h2>动漫智能推荐助手 2.0</h2>
         <p>通过多轮澄清、偏好记忆和评论证据，给出更可解释的动漫推荐。</p>
         <button>开始推荐</button>
       </article>

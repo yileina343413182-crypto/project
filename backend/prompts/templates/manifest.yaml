@@ -21,6 +21,14 @@ prompts:
       rag-v2-bounded: 2dc0fa51d9a11de5295a7ba4373908fefad6f888ce955de2e33a3fde82b32cd1
       rag-v3-injection-guard: 05f4a1647d25004d768edcc8a851dcbbdbd5d3ae2bbf6063ca27e05f5b45c4eb
       rag-v4-personalized-advisor: adeda5df70a67812f6cdc030edb9fe1f15e88f019c54eef7d20a822c90551c4f
+      rag-v5-bounded-reasons: 45c856502749af877889a511962c7b49c7365391114ef5e9951c7d7920b843dc
+      rag-v6-bounded-reasons: 47971d428b9a1c8233938aef22acb0bd3a317a17a3d51320416396966e7011d8
+  recommendation_followup:
+    versions:
+      v1: 14ef8de50bf589093a98d8678c780015d9357a05570792cde69e2490f04e62d4
   recommendation_intent:
     versions:
       v1: 55fd14495a37b15aa4be47050f5e67f9034cdde80683d33bfceb550324b9980f
+  watch_guide:
+    versions:
+      v1: bad3f184a2888f8fc107c4a09603aca4ba422d89b42c5bd84440f8088ff81ce1

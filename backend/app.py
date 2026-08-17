@@ -37,6 +37,7 @@ from backend.api.sentiment import router as sentiment_router
 from backend.api.topic import router as topic_router
 from backend.database import init_user_tables
 from backend.agents.memory import init_agent_tables
+from backend.agents.recommend_graph import close_recommendation_checkpointer
 from backend.rag.storage import init_rag_tables
 from backend.config import CORS_ORIGINS, DEBUG, HOST, PORT
 from backend.db.session import dispose_async_engines, dispose_sync_engines
@@ -54,14 +55,14 @@ logger = logging.getLogger(__name__)
 async def _lifespan(_app: FastAPI):
     """初始化业务表，并在 ASGI 进程退出时释放数据库连接池。
 
-    模型、线程池和 LangGraph Checkpointer 各自由对应模块管理，不在这里
-    重复创建或销毁。
+    模型与 Celery Worker 独立运行；这里只关闭 API 进程实际创建过的 Checkpointer。
     """
     init_user_tables()
     init_agent_tables()
     init_rag_tables()
     yield
     # 关闭阶段主动释放连接，避免开发期热重载遗留数据库连接。
+    close_recommendation_checkpointer()
     await dispose_async_engines()
     dispose_sync_engines()
 

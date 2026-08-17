@@ -17,6 +17,8 @@ from backend.agents.schemas import (
     AgentStep,
     LLMRecommendationResponse,
     PromptTrace,
+    RECOMMEND_REASON_MAX_CHARS,
+    RECOMMEND_REASON_MIN_CHARS,
     RetrievalEvidence,
 )
 from backend.agents.recommend_context import compact_history
@@ -57,7 +59,15 @@ def _validate_recommendation(data, candidates, evidence_map):
         if aid not in allowed: errors.append(f"anime_id {aid} is outside candidate pool"); continue
         if aid in seen: errors.append(f"duplicate anime_id {aid}")
         seen.add(aid); rec["name"] = allowed[aid].get("name", "")
-        if not str(rec.get("reason", "")).strip(): errors.append(f"anime_id {aid} has no reason")
+        reason = str(rec.get("reason") or "").strip()
+        rec["reason"] = reason
+        reason_chars = len(reason)
+        if not RECOMMEND_REASON_MIN_CHARS <= reason_chars <= RECOMMEND_REASON_MAX_CHARS:
+            errors.append(
+                f"anime_id {aid} reason must contain "
+                f"{RECOMMEND_REASON_MIN_CHARS} to {RECOMMEND_REASON_MAX_CHARS} "
+                f"characters after trimming; got {reason_chars}"
+            )
         refs = {x.get("doc_id") or (x.get("metadata") or {}).get("doc_id") for x in evidence_map.get(aid, [])}
         requested = rec.get("evidence_refs") or []
         if any(x not in refs for x in requested): errors.append(f"anime_id {aid} has foreign evidence")

@@ -49,6 +49,10 @@ class RetrievalEvidence(BaseModel):
     source_type: str = ""
     content: str = ""
     similarity: float = 0.0
+    rrf_score: float = 0.0
+    rerank_score: float | None = None
+    vector_rank: int | None = None
+    keyword_rank: int | None = None
     rank: int = 0
     source_label: str = ""
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -99,6 +103,12 @@ class LLMOpinionReportSchema(BaseModel):
 
 # ===== 推荐 Agent 输出 =====
 
+RECOMMEND_REASON_MIN_CHARS = 300
+RECOMMEND_REASON_MAX_CHARS = 500
+RECOMMEND_REASON_DESCRIPTION = (
+    "Recommendation reason with 300 to 500 Unicode characters after trimming"
+)
+
 class RecommendationEvidence(BaseModel):
     sentiment: dict[str, Any] = Field(default_factory=dict)
     topics: list[str] = Field(default_factory=list)
@@ -110,7 +120,7 @@ class AnimeRecommendation(BaseModel):
     name: str = ""
     platform: str = ""
     comment_count: int = 0
-    reason: str = ""
+    reason: str = Field(default="", description=RECOMMEND_REASON_DESCRIPTION)
     match_tags: list[str] = Field(default_factory=list)
     evidence: RecommendationEvidence = Field(default_factory=RecommendationEvidence)
     evidence_refs: list[str] = Field(default_factory=list)
@@ -120,7 +130,7 @@ class AnimeRecommendation(BaseModel):
 class LLMAnimeRecommendation(BaseModel):
     """Small model-owned recommendation decision; backend adds diagnostics."""
     anime_id: int
-    reason: str
+    reason: str = Field(description=RECOMMEND_REASON_DESCRIPTION)
     match_tags: list[str] = Field(default_factory=list)
     evidence_refs: list[str] = Field(default_factory=list)
 

@@ -1,6 +1,6 @@
 """FastAPI 请求专用的异步 Agent 会话、消息和任务持久化。
 
-这里不执行耗时 Agent；只在请求事务中创建记录或读取状态。后台线程使用
+这里不执行耗时 Agent；只在请求事务中创建记录或读取状态。Celery Worker 使用
 ``agents.memory`` 中对应的同步函数更新任务。
 """
 
@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from datetime import date, datetime
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.db.models import AgentMessage, AgentSession, AgentTask
@@ -67,12 +67,17 @@ async def create_agent_task(
     session_id: int,
     agent_type: str,
     input_data: dict | None = None,
+    *,
+    client_request_id: str | None = None,
+    turn_seq: int | None = None,
 ) -> int:
     """创建 queued 状态的后台任务记录。"""
     task = AgentTask(
         user_id=user_id,
         session_id=session_id,
         agent_type=agent_type,
+        client_request_id=client_request_id,
+        turn_seq=turn_seq,
         input_data=input_data or {},
         status="queued",
         progress=0,
@@ -88,6 +93,36 @@ async def create_agent_task(
     return task.id
 
 
+async def get_agent_task_by_request_id(
+    session: AsyncSession,
+    user_id: int,
+    agent_type: str,
+    client_request_id: str,
+) -> dict | None:
+    """按用户、Agent 类型和客户端幂等键读取既有任务。"""
+    task = await session.scalar(
+        select(AgentTask).where(
+            AgentTask.user_id == user_id,
+            AgentTask.agent_type == agent_type,
+            AgentTask.client_request_id == client_request_id,
+        )
+    )
+    return _task_dict(task)
+
+
+async def get_next_turn_seq(session: AsyncSession, session_id: int) -> int:
+    """在已锁定会话的事务中取得下一轮序号。"""
+    current = await session.scalar(
+        select(func.max(AgentTask.turn_seq)).where(AgentTask.session_id == session_id)
+    )
+    if current is not None:
+        return int(current) + 1
+    legacy_count = await session.scalar(
+        select(func.count()).select_from(AgentTask).where(AgentTask.session_id == session_id)
+    )
+    return int(legacy_count or 0) + 1
+
+
 async def get_agent_session(
     session: AsyncSession,
     user_id: int,
@@ -96,6 +131,17 @@ async def get_agent_session(
     for_update: bool = False,
 ) -> dict | None:
     """读取当前用户的会话和消息；可选加行锁用于追加消息。"""
+    if for_update and session.bind.dialect.name == "sqlite":
+        # SQLite 忽略 SELECT ... FOR UPDATE；一次原值 UPDATE 会取得写锁，
+        # 让“检查运行任务 + 追加任务”在并发请求间真正串行化。
+        await session.execute(
+            update(AgentSession)
+            .where(
+                AgentSession.user_id == user_id,
+                AgentSession.id == session_id,
+            )
+            .values(updated_at=AgentSession.updated_at)
+        )
     statement = select(AgentSession).where(
         AgentSession.user_id == user_id,
         AgentSession.id == session_id,
@@ -112,6 +158,16 @@ async def get_agent_session(
             .order_by(AgentMessage.id)
         )
     ).all()
+    active_task = await session.scalar(
+        select(AgentTask)
+        .where(
+            AgentTask.user_id == user_id,
+            AgentTask.session_id == session_id,
+            AgentTask.status.in_(("queued", "running")),
+        )
+        .order_by(AgentTask.id.desc())
+        .limit(1)
+    )
     return {
         "id": record.id,
         "agent_type": record.agent_type,
@@ -119,6 +175,7 @@ async def get_agent_session(
         "status": record.status,
         "created_at": _value(record.created_at),
         "updated_at": _value(record.updated_at),
+        "active_task": _active_task_dict(active_task),
         "messages": [
             {
                 "id": message.id,
@@ -141,6 +198,13 @@ def _task_dict(task: AgentTask | None) -> dict | None:
         "user_id": task.user_id,
         "session_id": task.session_id,
         "agent_type": task.agent_type,
+        "client_request_id": task.client_request_id,
+        "turn_seq": task.turn_seq,
+        "celery_task_id": task.celery_task_id,
+        "worker_id": task.worker_id,
+        "lease_until": _value(task.lease_until),
+        "heartbeat_at": _value(task.heartbeat_at),
+        "attempt_count": task.attempt_count,
         "status": task.status,
         "input": _value(task.input_data, {}),
         "result": _value(task.result, None),
@@ -151,6 +215,18 @@ def _task_dict(task: AgentTask | None) -> dict | None:
         "started_at": _value(task.started_at),
         "finished_at": _value(task.finished_at),
         "updated_at": _value(task.updated_at),
+    }
+
+
+def _active_task_dict(task: AgentTask | None) -> dict | None:
+    if task is None:
+        return None
+    return {
+        "task_id": task.id,
+        "status": task.status,
+        "current_step": task.current_step,
+        "client_request_id": task.client_request_id,
+        "turn_seq": task.turn_seq,
     }
 
 
@@ -186,6 +262,22 @@ async def list_agent_sessions(session: AsyncSession, user_id: int) -> list[dict]
             .order_by(AgentSession.updated_at.desc(), AgentSession.id.desc())
         )
     ).all()
+    session_ids = [record.id for record in records]
+    active_by_session = {}
+    if session_ids:
+        active_tasks = (
+            await session.scalars(
+                select(AgentTask)
+                .where(
+                    AgentTask.user_id == user_id,
+                    AgentTask.session_id.in_(session_ids),
+                    AgentTask.status.in_(("queued", "running")),
+                )
+                .order_by(AgentTask.id.desc())
+            )
+        ).all()
+        for task in active_tasks:
+            active_by_session.setdefault(task.session_id, _active_task_dict(task))
     return [
         {
             "id": record.id,
@@ -194,6 +286,7 @@ async def list_agent_sessions(session: AsyncSession, user_id: int) -> list[dict]
             "status": record.status,
             "created_at": _value(record.created_at),
             "updated_at": _value(record.updated_at),
+            "active_task": active_by_session.get(record.id),
         }
         for record in records
     ]
