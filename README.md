@@ -14,6 +14,26 @@
 > 使用 MySQL；SQLite 保留为迁移源、测试隔离数据库和未配置 MySQL 时的兼容后端。
 > Agent 后台任务由 Redis + Celery Worker 执行，推荐图 Checkpoint 生产环境使用 Redis。
 
+## Agent 核心亮点
+
+本项目不仅提供传统情感分析看板，还实现了一套可恢复、可追溯、可并行扩展的动漫领域
+Agent 系统。前端统一从“智能体中心”进入，FastAPI 负责任务与会话 API，Celery Worker
+执行长耗时推理，MySQL 保存业务状态，Redis 同时承担任务投递和 LangGraph Checkpoint。
+
+| Agent 能力 | 当前实现 |
+|------------|----------|
+| **推荐 Agent 2.0** | LangGraph `StateGraph` 编排多轮偏好问卷、候选检索、工具调用、证据绑定、结构化校验与降级恢复 |
+| **舆情诊断 Agent** | 聚合情感分布、主题与代表评论，输出带证据链、执行步骤和 Prompt Trace 的结构化报告 |
+| **推荐后续追问** | 推荐完成后支持自然语言继续追问；服务端保留会话上下文，同时校验候选与证据边界 |
+| **观看指南** | 可根据推荐结果生成并持久化番剧观看指南，支持当前用户分页查看、读取详情和删除 |
+| **混合 RAG** | Chroma 向量召回 + SQL 关键词召回 + RRF 融合 + 可选 qwen3-rerank，并在索引不可用时降级 |
+| **可靠任务执行** | Redis + Celery 分队列执行，支持幂等请求、会话内串行、跨会话并行、SQL 租约、心跳、崩溃重投递和遗留任务恢复 |
+| **PromptOps 与安全** | Prompt 不可变版本、模板哈希、运行 Trace、输入/证据/工具结果注入防护及受限只读工具 |
+
+Agent 生产运行与故障恢复见
+[`docs/agent-celery-redis.md`](docs/agent-celery-redis.md)，无本地 Docker 的环境可参考
+[`docs/redis-cloud-free.md`](docs/redis-cloud-free.md)。
+
 ---
 
 ## 目录
@@ -74,7 +94,7 @@
                           │
 ┌─────────────────────────▼───────────────────────────────────┐
 │       数据层（SQLAlchemy；MySQL 优先 / SQLite 兼容）           │
-│ 核心业务 5 表 + Agent 4 表 + RAG/评估 7 表                    │
+│ 核心业务 5 表 + Agent 5 表 + RAG/评估 7 表                    │
 └─────────────────────────┬───────────────────────────────────┘
                           │ 离线流水线
 ┌─────────────────────────▼───────────────────────────────────┐
@@ -175,7 +195,7 @@
 - 通过网页抓取（BeautifulSoup）解析 `bgm.tv/subject/{id}/comments?page=N`
 - 每条评论提取：`content`、`rate`（1-10 星级评分）、`time`
 
-**Top100 批量采集**：`crawler/crawl_top100.py` 脚本读取 `anime_id_list.txt`，批量采集 Bangumi 排名前 100 的番剧数据，已处理结果存于 `data/processed/bangumi_top100/`（100+ 个清洗后的 CSV 文件）
+**Top100 批量采集**：`crawler/crawl_top100.py` 直接读取 Bangumi 排行榜，批量采集排名前 100 的番剧数据，并支持断点续采；已处理结果存于 `data/processed/bangumi_top100/`（100+ 个清洗后的 CSV 文件）
 
 ### 5.3 豆瓣爬虫（`crawler/douban_crawler.py`）
 
@@ -650,15 +670,15 @@ project/
 ├── run_server.py                   # 备用启动脚本
 ├── prepare_data.py                 # 已有数据预测/主题与采集流程 CLI
 ├── batch_predict.py                # 批量情感预测脚本
-├── verify_majo.py                  # 单动漫端到端验证脚本
-├── test_api.py                     # API 接口测试脚本
+├── compose.agent.yml               # 本地 Redis 8 持久化与健康检查
 ├── requirements.txt                # Python 依赖列表
-├── alembic/                        # MySQL Schema 迁移（当前 revision 20260801_02）
+├── alembic/                        # MySQL Schema 迁移（当前 revision 20260814_05）
 ├── scripts/                        # SQLite→MySQL 迁移、全量核验和运行探测
 ├── tests/                          # API、ORM、Agent、Prompt 安全和 RAG 回归测试
 │
 ├── backend/                        # FastAPI 后端
 │   ├── app.py                      # 应用工厂，注册 APIRouter、lifespan 与 CORS
+│   ├── celery_app.py               # Celery 队列、Worker 生命周期和恢复任务
 │   ├── config.py                   # 全局配置（DB路径、端口、LLM Key、JWT密钥）
 │   ├── security.py                 # HS256 JWT 签发与认证依赖
 │   ├── database.py                 # 同步业务查询兼容入口
@@ -674,6 +694,9 @@ project/
 │   │   └── history.py              # POST/GET/DELETE /history/chat（JWT 保护）
 │   ├── agents/
 │   │   ├── recommend_graph.py      # LangGraph StateGraph、节点、边与 Checkpointer
+│   │   ├── recommend_followup.py   # 推荐完成后的多轮追问与结果约束
+│   │   ├── watch_guide.py          # 观看指南生成、校验与持久化
+│   │   ├── task_queue.py           # Celery 投递、租约、心跳、幂等和恢复
 │   │   ├── prompt_security.py      # 输入、评论、RAG 和工具结果的安全边界
 │   │   ├── opinion_agent.py        # 结构化舆情诊断 Agent
 │   │   └── tools.py                # Agent 工具注册表
@@ -692,8 +715,7 @@ project/
 │   ├── douban_crawler.py           # 豆瓣短评爬虫
 │   ├── cleaner.py                  # 清洗 + jieba 分词 + SQLAlchemy 写入
 │   ├── crawl_top100.py             # Bangumi Top100 批量采集
-│   ├── crawl_bili_top100.py        # B站 Top100 批量采集
-│   └── bilibili_top100.py          # B站追番排行榜工具
+│   └── crawl_bili_top100.py        # B站 Top100 批量采集
 │
 ├── models/                         # 情感分析模型
 │   ├── textcnn_classifier.py       # TextCNN：Vocab + Dataset + Model + 训练推理
@@ -1044,9 +1066,11 @@ cd frontend && npm run dev
 # 前端生产构建
 cd frontend && npm run build
 
-# 单动漫端到端验证（修改 verify_majo.py 常量后运行）
-python verify_majo.py --platform both --max_pages 5
-python verify_majo.py --dry-run   # 仅测试数据库初始化
+# 完整单元测试（含 API、ORM、Agent、Prompt 安全和 RAG）
+python -m unittest discover -s tests -p "test*_unittest.py"
+
+# 启动 Agent 所需的本地 Redis
+docker compose -f compose.agent.yml up -d
 ```
 
 ---
