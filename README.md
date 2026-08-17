@@ -2,7 +2,7 @@
 
 > 基于 TextCNN / BERT 的三分类情感分析 + LDA 主题建模 + LangGraph Agent + 混合 RAG + Vue 3 可视化看板
 >
-> 毕业设计项目（2026届）· Python 3.12 + FastAPI 0.139 + Vue 3 + MySQL 8 / SQLite 兼容
+> 毕业设计项目· Python 3.12 + FastAPI 0.139 + Vue 3 + MySQL 8 / SQLite 兼容
 
 > [!IMPORTANT]
 > 当前推荐 Agent 2.0 已迁移为 LangGraph `StateGraph`。运行时 Prompt 由
@@ -118,7 +118,7 @@ Agent 生产运行与故障恢复见
 | **数据采集** | B 站评论/弹幕爬取，支持搜索+按季索引；Bangumi 吐槽箱批量采集（Top100）；豆瓣短评采集 | requests + BeautifulSoup + B站公开 API |
 | **数据清洗** | HTML 标签净化、表情符号过滤、URL 去除、纯数字/纯符号过滤、短评过滤（<5字）、去重、jieba 分词、停用词去除 | jieba + pandas + re |
 | **自动标注** | Bangumi 按星级标注（7-10分→正面，5-6分→中性，1-4分→负面）；B 站按 SnowNLP 情感打分阈值标注 | snownlp |
-| **情感分析** | TextCNN 三分类（准确率 59.63%）；BERT 微调三分类（准确率 67.40%）；支持实时单条预测 | PyTorch + HuggingFace Transformers |
+| **情感分析** | TextCNN 三分类（准确率 59.63%）；BERT 微调三分类（准确率 87.40%）；支持实时单条预测 | PyTorch + HuggingFace Transformers |
 | **主题挖掘** | LDA 主题建模（默认 8 个主题），支持困惑度/一致性自动调参；TF-IDF / TextRank 关键词提取 | gensim |
 | **可视化看板** | 情感分布饼图、逐条情感趋势折线图、评论词云、LDA 主题卡片、评论列表（分页+情感过滤） | Vue 3 + ECharts 5 + echarts-wordcloud |
 | **用户系统** | 注册/登录、JWT Token 认证、bcrypt 密码哈希、聊天历史持久化 | PyJWT + bcrypt |
@@ -296,7 +296,7 @@ Agent 生产运行与故障恢复见
 
 **优势**：语义理解能力强，对中文口语化评论效果更好
 
-**准确率**：约 67%（验证集 Macro-F1）
+**准确率**：约 87%（验证集 Macro-F1）
 
 ### 8.3 模型评估（`models/evaluator.py`）
 
@@ -510,16 +510,22 @@ flowchart LR
     A["加载偏好"] --> B["检查用户输入"]
     B --> C["收集并评估偏好"]
     C -->|偏好不足| D["逐级追问"]
+    D -->|用户回答| C
     C -->|偏好充分| E["构建候选与检索证据"]
     E --> F["检查不可信证据"]
     F --> G["压缩上下文"]
     G --> H["Agent 决策"]
     H -->|需要补充只读证据| I["ToolNode"]
     I --> H
-    H --> J["结构化生成与校验"]
+    H --> |推荐类任务| J["结构化生成与校验"]
+    H --> |其他类任务| P["生成回答与校验"]
+    P -->|失败| K["修复或本地降级"]
+    P -->|成功| O["返回模型回答"]
     J -->|失败| K["修复或本地降级"]
     J -->|成功| L["返回推荐结果"]
-    L --> M["后续追问返回详细普通文本"]
+    O --> M["后续追问,分析用户问题"]
+    L --> M["后续追问,分析用户问题"]
+    M --> E
 ```
 
 关键约束：
@@ -802,11 +808,6 @@ cd project
 pip install -r requirements.txt
 ```
 
-若 `.venv` 返回 `Access is denied` 或 `Unable to create process`，先在正常
-PowerShell 中运行 `.venv\Scripts\python.exe --version`，并检查
-`pyvenv.cfg` 指向的基础解释器是否真实存在。Codex 等受限沙箱可能只是不允许
-执行用户目录中的基础 Python；只有正常终端也失败且基础解释器确实不存在时，
-才需要重建虚拟环境。
 
 > **GPU 加速**：如需 GPU 版 PyTorch，参考 https://pytorch.org/get-started/locally/ 替换 `torch` 安装命令。
 
@@ -861,7 +862,7 @@ $env:RECOMMEND_CHECKPOINT_BACKEND="redis"
 
 Agent 并发由推荐/舆情两个 Celery 队列的 Worker concurrency 控制；正式并发运行应使用
 MySQL 和 Redis 8。完整启动、恢复和生产部署说明见
-[`docs/agent-celery-redis.md`](docs/agent-celery-redis.md)；不安装 Docker 的个人开发/答辩环境
+[`docs/agent-celery-redis.md`](docs/agent-celery-redis.md)；不安装 Docker或unbtun
 可按 [`docs/redis-cloud-free.md`](docs/redis-cloud-free.md) 接入 Redis Cloud Free。
 
 ### 4. 安装前端依赖
@@ -1101,7 +1102,7 @@ docker compose -f compose.agent.yml up -d
 | 模型 | 准确率 | 架构 | 特点 |
 |------|--------|------|------|
 | TextCNN | 59.63% | Embedding → 多尺度 Conv(2,3,4) → MaxPool → Dropout → FC | 推理速度快，适合批量预测 |
-| BERT | 67.40% | bert-base-chinese + 分类头微调 | 语义理解更强，适合实时预测 |
+| BERT | 87.40% | bert-base-chinese + 分类头微调 | 语义理解更强，适合实时预测 |
 
 模型权重存放于 `models/saved/`，训练集位于 `data/train/`，训练/评估报告见 `models/saved/reports/`。
 
