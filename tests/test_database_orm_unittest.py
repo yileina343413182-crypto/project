@@ -21,6 +21,7 @@ from backend.agents.memory import init_agent_tables
 from backend.db.async_repository import delete_watch_guide, get_watch_guide, list_watch_guides
 from backend.db.models import (
     AgentMessage,
+    AgentAttachment,
     AgentSession,
     AgentTask,
     BUSINESS_TABLES,
@@ -28,6 +29,7 @@ from backend.db.models import (
     Comment,
     Topic,
     User,
+    UserAnimeStatus,
     WatchGuide,
 )
 from backend.db.session import get_async_engine, get_async_sessionmaker, get_sync_engine
@@ -47,11 +49,13 @@ class DatabaseOrmTest(unittest.TestCase):
         self.engine.dispose()
         self.path.unlink(missing_ok=True)
 
-    def test_schema_contains_exactly_17_business_tables(self):
+    def test_schema_contains_exactly_19_business_tables(self):
         tables = set(inspect(self.engine).get_table_names())
         self.assertEqual(tables, set(BUSINESS_TABLES))
-        self.assertEqual(len(tables), 17)
+        self.assertEqual(len(tables), 19)
+        self.assertIn("agent_attachments", tables)
         self.assertIn("watch_guides", tables)
+        self.assertIn("user_anime_statuses", tables)
         self.assertNotIn("checkpoints", tables)
         self.assertNotIn("writes", tables)
 
@@ -79,11 +83,17 @@ class DatabaseOrmTest(unittest.TestCase):
         comment_ddl = str(CreateTable(Comment.__table__).compile(dialect=dialect))
         topic_ddl = str(CreateTable(Topic.__table__).compile(dialect=dialect))
         guide_ddl = str(CreateTable(WatchGuide.__table__).compile(dialect=dialect))
+        attachment_ddl = str(CreateTable(AgentAttachment.__table__).compile(dialect=dialect))
+        status_ddl = str(CreateTable(UserAnimeStatus.__table__).compile(dialect=dialect))
         self.assertIn("sentiment_score DOUBLE", comment_ddl)
         self.assertIn("weight DOUBLE", topic_ddl)
         self.assertIn("guide_content LONGTEXT", guide_ddl)
         self.assertIn("UNIQUE (user_id, anime_key)", guide_ddl)
         self.assertIn("ON DELETE SET NULL", guide_ddl)
+        self.assertIn("content LONGBLOB", attachment_ddl)
+        self.assertIn("ON DELETE CASCADE", attachment_ddl)
+        self.assertIn("PRIMARY KEY (user_id, anime_id)", status_ddl)
+        self.assertIn("status IN ('watched', 'watching', 'unwatched')", status_ddl)
 
     def test_agent_task_schema_contains_m1_idempotency_and_turn_indexes(self):
         inspector = inspect(self.engine)
@@ -453,6 +463,31 @@ class DatabaseOrmTest(unittest.TestCase):
         with patch.object(WatchGuide.__table__, "create") as create_mock:
             migration.upgrade()
         create_mock.assert_called_once()
+
+    def test_agent_attachment_revision_adds_only_the_missing_table(self):
+        migration_path = (
+            Path(__file__).resolve().parents[1]
+            / "alembic"
+            / "versions"
+            / "20260819_06_add_agent_attachments.py"
+        )
+        spec = importlib.util.spec_from_file_location("agent_attachment_migration", migration_path)
+        migration = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(migration)
+        engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
+        try:
+            with engine.begin() as connection:
+                Base.metadata.create_all(
+                    connection,
+                    tables=[User.__table__, AgentSession.__table__],
+                )
+                context = MigrationContext.configure(connection)
+                migration.op = Operations(context)
+                migration.upgrade()
+                self.assertTrue(inspect(connection).has_table(AgentAttachment.__tablename__))
+                migration.upgrade()
+        finally:
+            engine.dispose()
 
 
 if __name__ == "__main__":

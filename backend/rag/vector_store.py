@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sqlite3
 import time
 os.environ.setdefault("ANONYMIZED_TELEMETRY", "False")
 
@@ -13,7 +14,30 @@ from backend.rag.embeddings import EmbeddingClient
 
 logger = logging.getLogger(__name__)
 
-CHROMA_PATH = os.environ.get("CHROMA_PATH", os.path.join(PROJECT_ROOT, "data", "chroma"))
+
+def _default_chroma_path(
+    project_root: str = PROJECT_ROOT,
+    platform: str = os.name,
+    local_appdata: str | None = None,
+) -> str:
+    """避开 Windows 原生 hnswlib 无法持久化非 ASCII 路径的问题。"""
+    project_path = os.path.join(project_root, "data", "chroma")
+    if platform != "nt" or project_path.isascii():
+        return project_path
+    appdata_path = (local_appdata or os.environ.get("LOCALAPPDATA", "")).strip()
+    if not appdata_path:
+        return project_path
+    return os.path.join(appdata_path, "bangumi-agent", "chroma")
+
+
+CHROMA_PATH = os.environ.get("CHROMA_PATH", _default_chroma_path())
+_PERSISTED_HNSW_FILES = {
+    "header.bin",
+    "data_level0.bin",
+    "length.bin",
+    "link_lists.bin",
+    "index_metadata.pickle",
+}
 
 
 def chroma_available() -> bool:
@@ -55,6 +79,65 @@ class ChromaVectorStore:
         if client is None:
             return None
         return client.get_or_create_collection(name=collection_name)
+
+    def get_existing_collection(self, collection_name: str):
+        """只打开已有集合；查询路径不得静默创建空集合。"""
+        client = self._get_client()
+        if client is None:
+            return None
+        return client.get_collection(name=collection_name)
+
+    def persisted_index_status(self, collection_name: str | None) -> dict:
+        """检查集合计数与本地 HNSW segment 文件，避免只相信 SQLite 元数据。"""
+        result = {
+            "collection_name": collection_name or "",
+            "collection_exists": False,
+            "chroma_count": 0,
+            "vector_segment_id": "",
+            "index_files_complete": False,
+            "missing_files": sorted(_PERSISTED_HNSW_FILES),
+            "error_type": "",
+            "error": "",
+        }
+        if not collection_name or not self.available:
+            return result
+        try:
+            collection = self.get_existing_collection(collection_name)
+            if collection is None:
+                return result
+            result["collection_exists"] = True
+            result["chroma_count"] = int(collection.count())
+
+            sqlite_path = os.path.join(self.persist_path, "chroma.sqlite3")
+            with sqlite3.connect(sqlite_path) as connection:
+                row = connection.execute(
+                    "SELECT id FROM segments "
+                    "WHERE collection = ? AND scope = 'VECTOR' LIMIT 1",
+                    (str(collection.id),),
+                ).fetchone()
+            if not row:
+                result["error_type"] = "MissingVectorSegment"
+                result["error"] = "collection has no persisted vector segment"
+                return result
+
+            segment_id = str(row[0])
+            result["vector_segment_id"] = segment_id
+            segment_path = os.path.join(self.persist_path, segment_id)
+            existing = {
+                entry.name
+                for entry in os.scandir(segment_path)
+                if entry.is_file()
+            } if os.path.isdir(segment_path) else set()
+            missing = sorted(_PERSISTED_HNSW_FILES - existing)
+            result["missing_files"] = missing
+            result["index_files_complete"] = not missing
+            if missing:
+                result["error_type"] = "IncompleteHnswSegment"
+                result["error"] = "missing persisted HNSW files: " + ", ".join(missing)
+        except Exception as exc:
+            result["error_type"] = type(exc).__name__
+            result["error"] = str(exc)[:300]
+        return result
 
     def upsert(self, collection_name: str, docs: list[dict], embedding_client: EmbeddingClient | None = None, batch_size: int = 10) -> int:
         """分批生成向量并幂等写入；Embedding 失败时返回已写数量。"""
@@ -106,7 +189,7 @@ class ChromaVectorStore:
         embeddings = embedding_client.embed_texts([query])
         if not embeddings:
             return []
-        collection = self.get_collection(collection_name)
+        collection = self.get_existing_collection(collection_name)
         if collection is None:
             return []
         where = {"anime_id": anime_id} if anime_id is not None else None

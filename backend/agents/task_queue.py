@@ -20,6 +20,7 @@ from backend.agents.memory import (
     save_agent_message,
     take_recoverable_agent_tasks,
 )
+from backend.agents.stream_events import AgentStreamEmitter
 from backend.celery_app import celery_app
 from backend.config import (
     AGENT_TASK_HEARTBEAT_SECONDS,
@@ -75,6 +76,7 @@ def _dispatch_agent_task(task: dict) -> dict:
     session_id = int(task["session_id"])
     input_data = task.get("input") or {}
     agent_type = task.get("agent_type")
+    stream = AgentStreamEmitter(task_id, task.get("attempt_count") or 1)
 
     # 延迟导入避免 API router 导入 task_queue 时形成模块循环；Worker 只调用白名单函数。
     from backend.api import agent as agent_api
@@ -86,6 +88,7 @@ def _dispatch_agent_task(task: dict) -> dict:
             input_data.get("name"),
             str(input_data.get("query") or ""),
             task_id=task_id,
+            stream=stream,
         )
     if agent_type == "recommendation":
         history = input_data.get("history") or []
@@ -99,6 +102,10 @@ def _dispatch_agent_task(task: dict) -> dict:
             input_data.get("recommendation_context"),
             watch_turn.get("state"),
             str(watch_turn.get("action") or "normal"),
+            input_data.get("attachment_id"),
+            input_data.get("excluded_anime_ids") or [],
+            bool(input_data.get("initial_turn")),
+            stream=stream,
         )
     raise ValueError(f"unsupported agent type: {agent_type}")
 
@@ -151,18 +158,29 @@ def execute_agent_task(self, task_id: int) -> dict:
     worker_id = f"{hostname}:{request_id}"[:255]
     claim = claim_agent_task(task_id, worker_id, AGENT_TASK_LEASE_SECONDS)
     claim_state = claim.get("claim_state")
+    task = claim.get("task") or {}
     if claim_state == "missing":
         return {"status": "missing", "task_id": task_id}
     if claim_state == "terminal":
-        task = claim.get("task") or {}
         return task.get("result") or {"status": task.get("status"), "task_id": task_id}
     if claim_state == "busy":
         return {"status": "duplicate_ignored", "task_id": task_id}
 
     existing_message = get_agent_message_by_task_id(task_id)
     if existing_message is not None:
-        return _restore_terminal_from_message(task_id, existing_message)
+        payload = _restore_terminal_from_message(task_id, existing_message)
+        AgentStreamEmitter(task_id, task.get("attempt_count") or 1).emit(
+            "task_completed",
+            status="succeeded",
+        )
+        return payload
 
+    stream = AgentStreamEmitter(task_id, task.get("attempt_count") or 1)
+    stream.emit(
+        "task_started",
+        agent_type=task.get("agent_type"),
+        session_id=task.get("session_id"),
+    )
     stopped, heartbeat_thread = _start_heartbeat(task_id, worker_id)
     try:
         task = get_agent_task_by_id(task_id)
@@ -175,6 +193,12 @@ def execute_agent_task(self, task_id: int) -> dict:
                 mark_task_failed(task_id, str(result.get("error")), result)
             else:
                 mark_task_succeeded(task_id, result)
+            terminal = get_agent_task_by_id(task_id) or {}
+        final_status = terminal.get("status") or "succeeded"
+        stream.emit(
+            "task_failed" if final_status == "failed" else "task_completed",
+            status=final_status,
+        )
         return result
     except Exception as exc:
         logger.exception("Agent task %s failed", task_id)
@@ -194,6 +218,7 @@ def execute_agent_task(self, task_id: int) -> dict:
             except Exception:  # pragma: no cover - preserve the original worker failure
                 logger.exception("Failed to persist Agent task %s error message", task_id)
                 mark_task_failed(task_id, message)
+        stream.emit("task_failed", status="failed", message=message)
         raise
     finally:
         stopped.set()

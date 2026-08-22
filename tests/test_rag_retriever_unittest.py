@@ -10,7 +10,7 @@ for _key_name in ("EMBEDDING_API_KEY", "RERANK_API_KEY", "DASHSCOPE_API_KEY", "Q
     os.environ[_key_name] = ""
 
 from backend.rag.reranker import BailianReranker
-from backend.rag.retriever import _rrf_fuse, search_evidence
+from backend.rag.retriever import _deduplicate_evidence, _rrf_fuse, search_evidence
 
 
 def _item(doc_id, similarity):
@@ -31,6 +31,18 @@ class HybridRetrieverTest(unittest.TestCase):
         self.assertEqual(fused[0]["metadata"]["doc_id"], "both")
         self.assertEqual(fused[0]["vector_rank"], 2)
         self.assertEqual(fused[0]["keyword_rank"], 2)
+
+    def test_deduplicate_uses_doc_id_and_normalized_content(self):
+        first = _item("first", 0.9)
+        first["content"] = "Ｔｅｓｔ   文本"
+        same_content = _item("second", 0.8)
+        same_content["content"] = "test 文本"
+        same_doc = _item("first", 0.7)
+        same_doc["content"] = "different"
+
+        result = _deduplicate_evidence([first, same_content, same_doc])
+
+        self.assertEqual([item["metadata"]["doc_id"] for item in result], ["first"])
 
     @patch("backend.rag.retriever.get_collection_metadata")
     @patch("backend.rag.retriever.get_active_collection", return_value="active")
@@ -81,6 +93,46 @@ class HybridRetrieverTest(unittest.TestCase):
         self.assertEqual(result["retrieval_counts"], {"vector": 2, "keyword": 2, "fused": 3})
         self.assertEqual(len(reranker.rerank.call_args.args[1]), 3)
         self.assertEqual(result["evidence"][0]["rerank_score"], 0.99)
+        self.assertEqual(vector_store_cls.return_value.query.call_args.kwargs["top_k"], 50)
+        self.assertEqual(keyword_search.call_args.kwargs["top_k"], 50)
+
+    @patch("backend.rag.retriever.get_collection_metadata")
+    @patch("backend.rag.retriever.get_active_collection", return_value="active")
+    @patch("backend.rag.retriever.BailianReranker")
+    @patch("backend.rag.retriever.keyword_search_documents", return_value=[])
+    @patch("backend.rag.retriever.ChromaVectorStore")
+    @patch("backend.rag.retriever.EmbeddingClient")
+    def test_only_top_twenty_fused_candidates_are_sent_to_reranker(
+        self,
+        embedding_cls,
+        vector_store_cls,
+        _keyword_search,
+        reranker_cls,
+        _active_collection,
+        collection_metadata,
+    ):
+        from backend.rag.retriever import EMBEDDING_MODEL, EMBEDDING_PROVIDER
+
+        embedding_cls.return_value.available = True
+        collection_metadata.return_value = {
+            "embedding_provider": EMBEDDING_PROVIDER,
+            "embedding_model": EMBEDDING_MODEL,
+        }
+        vector_store_cls.return_value.query.return_value = [
+            _item(f"doc-{index}", 1 - index / 100)
+            for index in range(30)
+        ]
+        reranker = reranker_cls.return_value
+        reranker.available = True
+        reranker.rerank.side_effect = (
+            lambda _query, candidates, top_k: candidates[:top_k]
+        )
+
+        result = search_evidence("query", top_k=10)
+
+        self.assertEqual(len(reranker.rerank.call_args.args[1]), 20)
+        self.assertEqual(len(result["evidence"]), 10)
+        self.assertEqual(result["deduplication"]["rerank_candidates"], 20)
 
     @patch("backend.rag.retriever.get_collection_metadata", return_value=None)
     @patch("backend.rag.retriever.get_active_collection", return_value="active")
@@ -104,6 +156,43 @@ class HybridRetrieverTest(unittest.TestCase):
         self.assertEqual(result["mode"], "keyword")
         self.assertTrue(result["fallback"])
         self.assertFalse(result["rerank_applied"])
+        self.assertEqual(result["evidence"][0]["doc_id"], "keyword")
+
+    @patch("backend.rag.retriever.get_collection_metadata")
+    @patch("backend.rag.retriever.get_active_collection", return_value="active")
+    @patch("backend.rag.retriever.BailianReranker")
+    @patch("backend.rag.retriever.keyword_search_documents", return_value=[_item("keyword", 0.7)])
+    @patch("backend.rag.retriever.ChromaVectorStore")
+    @patch("backend.rag.retriever.EmbeddingClient")
+    def test_vector_failure_is_visible_while_keyword_results_survive(
+        self,
+        embedding_cls,
+        vector_store_cls,
+        _keyword_search,
+        reranker_cls,
+        _active_collection,
+        collection_metadata,
+    ):
+        from backend.rag.retriever import EMBEDDING_MODEL, EMBEDDING_PROVIDER
+
+        embedding_cls.return_value.available = True
+        collection_metadata.return_value = {
+            "embedding_provider": EMBEDDING_PROVIDER,
+            "embedding_model": EMBEDDING_MODEL,
+        }
+        vector_store_cls.return_value.query.side_effect = RuntimeError(
+            "Cannot open header file"
+        )
+        reranker_cls.return_value.available = False
+        reranker_cls.return_value.rerank.return_value = None
+
+        result = search_evidence("query", top_k=1)
+
+        self.assertEqual(result["mode"], "keyword")
+        self.assertEqual(result["fallback_reason"], "vector_query_failed")
+        self.assertTrue(result["vector_attempted"])
+        self.assertEqual(result["vector_error_type"], "RuntimeError")
+        self.assertIn("Cannot open header file", result["vector_error"])
         self.assertEqual(result["evidence"][0]["doc_id"], "keyword")
 
 

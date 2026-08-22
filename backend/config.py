@@ -173,7 +173,7 @@ LLM_API_KEY = next(
 _LLM_PRESETS = {
     "qwen": {
         "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        "model": "qwen3-8b",
+        "model": "qwen3.7-plus",
     },
     "openai": {
         "base_url": "https://api.openai.com/v1",
@@ -229,7 +229,7 @@ RERANK_MAX_DOCUMENT_CHARS = _get_int_env("RERANK_MAX_DOCUMENT_CHARS", 6000)
 OPINION_LLM_TIMEOUT = _get_int_env("OPINION_LLM_TIMEOUT", LLM_TIMEOUT)
 OPINION_LLM_MAX_TOKENS = _get_int_env("OPINION_LLM_MAX_TOKENS", 1800)
 OPINION_LLM_REPAIR_MAX_TOKENS = _get_int_env("OPINION_LLM_REPAIR_MAX_TOKENS", 2000)
-OPINION_PROMPT_MAX_CHARS = _get_int_env("OPINION_PROMPT_MAX_CHARS", 7000)
+OPINION_PROMPT_MAX_CHARS = _get_int_env("OPINION_PROMPT_MAX_CHARS", 10000)
 
 # ===== 推荐 Agent 2.0 配置 =====
 
@@ -240,12 +240,12 @@ RECOMMEND_CANDIDATE_LIMIT = _get_int_env(
 
 RECOMMEND_EVIDENCE_CANDIDATES = _get_int_env(
     "RECOMMEND_EVIDENCE_CANDIDATES",
-    4,
+    5,
 )
 
 RECOMMEND_EVIDENCE_PER_ANIME = _get_int_env(
     "RECOMMEND_EVIDENCE_PER_ANIME",
-    3,
+    4,
 )
 
 RECOMMEND_COMMENT_MAX_CHARS = _get_int_env(
@@ -255,7 +255,7 @@ RECOMMEND_COMMENT_MAX_CHARS = _get_int_env(
 
 RECOMMEND_CONTEXT_MAX_CHARS = _get_int_env(
     "RECOMMEND_CONTEXT_MAX_CHARS",
-    2000,
+    8000,
 )
 
 RECOMMEND_HISTORY_LIMIT = _get_int_env(
@@ -271,7 +271,7 @@ RECOMMEND_LLM_MAX_TOKENS = _get_int_env("RECOMMEND_LLM_MAX_TOKENS", 2800)
 RECOMMEND_LLM_REPAIR_MAX_TOKENS = _get_int_env("RECOMMEND_LLM_REPAIR_MAX_TOKENS", 2800)
 RECOMMEND_FOLLOWUP_MAX_TOKENS = _get_int_env("RECOMMEND_FOLLOWUP_MAX_TOKENS", 2200)
 RECOMMEND_LLM_TIMEOUT = _get_int_env("RECOMMEND_LLM_TIMEOUT", 60)
-RECOMMEND_PROMPT_MAX_CHARS = _get_int_env("RECOMMEND_PROMPT_MAX_CHARS", 6000)
+RECOMMEND_PROMPT_MAX_CHARS = _get_int_env("RECOMMEND_PROMPT_MAX_CHARS", 10000)
 RECOMMEND_TOOL_MAX_ROUNDS = _get_int_env("RECOMMEND_TOOL_MAX_ROUNDS", 3)
 RECOMMEND_GRAPH_RECURSION_LIMIT = _get_int_env("RECOMMEND_GRAPH_RECURSION_LIMIT", 30)
 RECOMMEND_CHECKPOINT_DB = os.environ.get(
@@ -283,6 +283,23 @@ AGENT_REDIS_KEY_PREFIX = os.environ.get(
     "AGENT_REDIS_KEY_PREFIX",
     "anime-agent",
 ).strip().strip(":")
+AGENT_STREAM_ENABLED = _get_bool_env("AGENT_STREAM_ENABLED", True)
+AGENT_STREAM_TTL_SECONDS = max(
+    60,
+    _get_int_env("AGENT_STREAM_TTL_SECONDS", 900),
+)
+AGENT_STREAM_MAX_EVENTS = max(
+    32,
+    _get_int_env("AGENT_STREAM_MAX_EVENTS", 256),
+)
+AGENT_STREAM_BLOCK_MS = max(
+    1000,
+    _get_int_env("AGENT_STREAM_BLOCK_MS", 10000),
+)
+AGENT_STREAM_MAX_CONNECTIONS = max(
+    1,
+    _get_int_env("AGENT_STREAM_MAX_CONNECTIONS", 4),
+)
 RECOMMEND_CHECKPOINT_BACKEND = os.environ.get(
     "RECOMMEND_CHECKPOINT_BACKEND",
     "redis",

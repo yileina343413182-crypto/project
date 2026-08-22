@@ -16,7 +16,7 @@ from sqlalchemy.dialects.mysql import insert as mysql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from backend.database import orm_session
-from backend.db.models import AgentMessage, AgentSession, AgentTask, User, UserPreference, WatchGuide
+from backend.db.models import AgentAttachment, AgentMessage, AgentSession, AgentTask, User, UserAnimeStatus, UserPreference, WatchGuide
 from backend.db.session import get_sync_engine
 
 
@@ -49,10 +49,12 @@ def init_agent_tables(db_path=None):
         tables=[
             User.__table__,
             AgentSession.__table__,
+            AgentAttachment.__table__,
             AgentMessage.__table__,
             AgentTask.__table__,
             UserPreference.__table__,
             WatchGuide.__table__,
+            UserAnimeStatus.__table__,
         ],
         checkfirst=True,
     )
@@ -605,6 +607,20 @@ def take_recoverable_agent_tasks(stale_seconds: int, limit: int = 100) -> list[d
             task.updated_at = now
             recovered.append({"id": task.id, "agent_type": task.agent_type})
         return recovered
+
+
+# ===== 番剧观看状态 =====
+
+def get_non_recommendable_anime_ids(user_id: int) -> set[int]:
+    """返回当前用户明确标记为已看过或观看中的动漫 ID。"""
+    with orm_session() as session:
+        values = session.scalars(
+            select(UserAnimeStatus.anime_id).where(
+                UserAnimeStatus.user_id == int(user_id),
+                UserAnimeStatus.status.in_(("watched", "watching")),
+            )
+        ).all()
+    return {int(value) for value in values}
 
 
 # ===== 用户长期偏好 =====

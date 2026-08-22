@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from backend.agents.fallback import build_recommendation_fallback
@@ -17,8 +18,6 @@ from backend.agents.schemas import (
     AgentStep,
     LLMRecommendationResponse,
     PromptTrace,
-    RECOMMEND_REASON_MAX_CHARS,
-    RECOMMEND_REASON_MIN_CHARS,
     RetrievalEvidence,
 )
 from backend.agents.recommend_context import compact_history
@@ -39,12 +38,34 @@ def _evidence_models(evidence: list[dict]) -> list[RetrievalEvidence]:
 # 只有这些字段允许从模型输出进入偏好建议，最终持久化前还会经过安全过滤。
 _PREF_FIELDS = {"likes", "dislikes", "preferred_moods", "preferred_genres", "feedback"}
 
+
+def _normalize_match_tags(value):
+    """清理模型偶发生成的包围符号并按显示语义去重。"""
+    values = value if isinstance(value, list) else []
+    normalized = []
+    seen = set()
+    for item in values:
+        text = re.sub(r"[\u200b-\u200d\ufeff]", "", str(item or "")).strip()
+        text = re.sub(r"^[\[\]【】()（）<>《》]+", "", text).strip()
+        text = re.sub(r"^匹配\s*[:：]\s*", "匹配：", text)
+        compact = re.sub(r"\s+", "", text).rstrip("＋+−-")
+        if compact in {"口碑", "口碑依据"}:
+            text, key = "口碑", "口碑"
+        elif compact in {"评论证据", "评论检索证据"}:
+            text, key = "评论证据", "评论证据"
+        else:
+            key = text.casefold()
+        if text and key not in seen:
+            seen.add(key)
+            normalized.append(text)
+    return normalized[:10]
+
 def _plain_step(name, status, detail, started=None):
     """构造统一的 Agent 执行步骤，便于前端展示和问题追踪。"""
     import time
     return {"name": name, "status": status, "detail": detail, "elapsed_ms": int((time.perf_counter()-started)*1000) if started else 0}
 
-def _validate_recommendation(data, candidates, evidence_map):
+def _validate_recommendation(data, candidates, evidence_map, required_count=None):
     """限制推荐数量、候选范围和证据归属，返回清洗结果及错误列表。"""
     errors, seen = [], set(); allowed = {int(x["id"]): x for x in candidates}
     recs = data.get("recommendations") or []
@@ -52,7 +73,11 @@ def _validate_recommendation(data, candidates, evidence_map):
         if recs: errors.append("clarification must not include recommendations")
         data["recommendations"] = []
         return data, errors
-    if not 1 <= len(recs) <= 3: errors.append("recommendations must contain 1 to 3 items")
+    if required_count is not None:
+        if len(recs) != required_count:
+            errors.append(f"recommendations must contain exactly {required_count} items")
+    elif not 1 <= len(recs) <= 3:
+        errors.append("recommendations must contain 1 to 3 items")
     for rec in recs:
         try: aid = int(rec.get("anime_id"))
         except (TypeError, ValueError): errors.append("invalid anime_id"); continue
@@ -61,13 +86,9 @@ def _validate_recommendation(data, candidates, evidence_map):
         seen.add(aid); rec["name"] = allowed[aid].get("name", "")
         reason = str(rec.get("reason") or "").strip()
         rec["reason"] = reason
-        reason_chars = len(reason)
-        if not RECOMMEND_REASON_MIN_CHARS <= reason_chars <= RECOMMEND_REASON_MAX_CHARS:
-            errors.append(
-                f"anime_id {aid} reason must contain "
-                f"{RECOMMEND_REASON_MIN_CHARS} to {RECOMMEND_REASON_MAX_CHARS} "
-                f"characters after trimming; got {reason_chars}"
-            )
+        rec["match_tags"] = _normalize_match_tags(rec.get("match_tags"))
+        if not reason:
+            errors.append(f"anime_id {aid} reason must not be empty")
         refs = {x.get("doc_id") or (x.get("metadata") or {}).get("doc_id") for x in evidence_map.get(aid, [])}
         requested = rec.get("evidence_refs") or []
         if any(x not in refs for x in requested): errors.append(f"anime_id {aid} has foreign evidence")
@@ -120,10 +141,16 @@ def _render_bounded_prompt(
         "candidate_context_chars": len(json.dumps(items, ensure_ascii=False)), "history_chars": len(json.dumps(compact, ensure_ascii=False)),
         "schema_chars": schema_chars, "estimated_input_tokens": int((len(prompt)+schema_chars)/1.5), "max_output_tokens": RECOMMEND_LLM_MAX_TOKENS}
 
-def _local_result(query, candidates, preferences, evidence_map, steps, trace, reason, diagnostics, budget=None):
+def _local_result(query, candidates, preferences, evidence_map, steps, trace, reason, diagnostics, budget=None, required_count=None):
     """把本地推荐补齐为与正常 LLM 路径一致的响应与追踪字段。"""
     candidates = sorted(candidates, key=lambda x: (bool(evidence_map.get(int(x["id"]))), x.get("final_score", x.get("score", 0))), reverse=True)
-    result = build_recommendation_fallback(query, candidates, preferences)
+    result = build_recommendation_fallback(
+        query,
+        candidates,
+        preferences,
+        evidence_map=evidence_map,
+        required_count=required_count,
+    )
     all_items = [x for values in evidence_map.values() for x in values]
     result.retrieval_evidence = _evidence_models(all_items); result.evidence_refs = [x.get("doc_id", "") for x in all_items]
     result.prompt_trace = PromptTrace(**trace); result.fallback_reason = reason
@@ -139,11 +166,20 @@ def run_recommendation_agent(
     history: list[dict] | None = None,
     *,
     task_id: int | None = None,
+    excluded_anime_ids: list[int] | None = None,
+    force_recommendation: bool = False,
 ) -> dict:
     """兼容旧调用方的公开入口，实际委托给 LangGraph 工作流。"""
     from backend.agents.recommend_graph import run_recommendation_graph
 
-    return run_recommendation_graph(user_id, query, history, task_id=task_id)
+    return run_recommendation_graph(
+        user_id,
+        query,
+        history,
+        task_id=task_id,
+        excluded_anime_ids=excluded_anime_ids,
+        force_recommendation=force_recommendation,
+    )
 
 
 

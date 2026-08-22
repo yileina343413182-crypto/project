@@ -6,6 +6,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 import json
 import logging
+import unicodedata
 
 from sqlalchemy import or_, select
 
@@ -19,6 +20,8 @@ from backend.rag.vector_store import ChromaVectorStore
 
 logger = logging.getLogger(__name__)
 RRF_K = 60
+INITIAL_RECALL_TOP_K = 50
+RERANK_CANDIDATE_LIMIT = 20
 
 
 def search_evidence(query: str, anime_id: int | None = None, top_k: int = 6) -> dict:
@@ -27,9 +30,11 @@ def search_evidence(query: str, anime_id: int | None = None, top_k: int = 6) -> 
     embedding_client = EmbeddingClient()
     collection_metadata = get_collection_metadata(collection_name)
     model_matches = bool(collection_metadata and collection_metadata.get("embedding_provider") == EMBEDDING_PROVIDER and collection_metadata.get("embedding_model") == EMBEDDING_MODEL)
-    candidate_k = max(top_k, top_k * 2)
+    candidate_k = max(top_k, INITIAL_RECALL_TOP_K)
     vector_evidence = []
     keyword_evidence = []
+    vector_error_type = ""
+    vector_error = ""
 
     # 只有活动集合的模型元数据与当前配置一致时才查询向量，避免维度错配。
     vector_enabled = bool(collection_name and embedding_client.available and model_matches)
@@ -59,13 +64,17 @@ def search_evidence(query: str, anime_id: int | None = None, top_k: int = 6) -> 
             try:
                 vector_evidence = vector_future.result()
             except Exception as exc:
+                vector_error_type = type(exc).__name__
+                vector_error = str(exc)[:300]
                 logger.warning("Vector retrieval failed: %s", exc)
 
     fused_evidence = _rrf_fuse(vector_evidence, keyword_evidence)
-    evidence = fused_evidence
+    deduplicated_evidence = _deduplicate_evidence(fused_evidence)
+    rerank_candidates = deduplicated_evidence[:RERANK_CANDIDATE_LIMIT]
+    evidence = rerank_candidates
     mode = "hybrid" if vector_evidence and keyword_evidence else "chroma" if vector_evidence else "keyword"
     reranker = BailianReranker()
-    reranked = reranker.rerank(query, evidence, top_k=top_k)
+    reranked = reranker.rerank(query, rerank_candidates, top_k=top_k)
     rerank_applied = reranked is not None
     if reranked is not None:
         evidence = reranked
@@ -75,14 +84,26 @@ def search_evidence(query: str, anime_id: int | None = None, top_k: int = 6) -> 
         mode = "live_database"
         evidence = _live_database_evidence(query, anime_id=anime_id, top_k=top_k)
 
+    if not model_matches:
+        fallback_reason = "embedding_model_mismatch"
+    elif vector_error:
+        fallback_reason = "vector_query_failed"
+    elif not vector_enabled:
+        fallback_reason = "vector_not_configured"
+    else:
+        fallback_reason = ""
+
     return {
         "query": query,
         "collection_name": collection_name,
         "collection_metadata": collection_metadata,
         "model_matches_active_index": model_matches,
-        "fallback_reason": "" if model_matches else "embedding_model_mismatch",
+        "fallback_reason": fallback_reason,
         "mode": mode,
         "fallback": mode in {"keyword", "live_database"},
+        "vector_attempted": vector_future is not None,
+        "vector_error_type": vector_error_type,
+        "vector_error": vector_error,
         "fusion_method": "rrf",
         "rerank_applied": rerank_applied,
         "rerank_fallback_reason": "" if rerank_applied else "reranker_failed" if reranker.available else "reranker_not_configured",
@@ -90,6 +111,12 @@ def search_evidence(query: str, anime_id: int | None = None, top_k: int = 6) -> 
             "vector": len(vector_evidence),
             "keyword": len(keyword_evidence),
             "fused": len(fused_evidence),
+        },
+        "deduplication": {
+            "before": len(fused_evidence),
+            "after": len(deduplicated_evidence),
+            "removed": len(fused_evidence) - len(deduplicated_evidence),
+            "rerank_candidates": len(rerank_candidates),
         },
         "top_k": top_k,
         "evidence": _normalize_evidence(evidence[:top_k]),
@@ -118,6 +145,31 @@ def _rrf_fuse(vector_evidence: list[dict], keyword_evidence: list[dict], rrf_k: 
     return result
 
 
+def _deduplicate_evidence(evidence: list[dict]) -> list[dict]:
+    """按文档 ID 和标准化正文去重，保留 RRF 排名最高的条目。"""
+    result = []
+    seen_doc_ids = set()
+    seen_contents = set()
+    for item in evidence:
+        metadata = item.get("metadata") or {}
+        doc_id = str(item.get("doc_id") or metadata.get("doc_id") or "").strip()
+        content = unicodedata.normalize(
+            "NFKC",
+            str(item.get("content") or ""),
+        ).casefold()
+        content_key = " ".join(content.split())
+        if doc_id and doc_id in seen_doc_ids:
+            continue
+        if content_key and content_key in seen_contents:
+            continue
+        if doc_id:
+            seen_doc_ids.add(doc_id)
+        if content_key:
+            seen_contents.add(content_key)
+        result.append(item)
+    return result
+
+
 def evidence_doc_ids(evidence: list[dict]) -> list[str]:
     """按出现顺序提取并去重证据 ID。"""
     ids = []
@@ -133,10 +185,12 @@ def _normalize_evidence(evidence: list[dict]) -> list[dict]:
     result = []
     for idx, item in enumerate(evidence, start=1):
         metadata = item.get("metadata") or {}
+        full_content = str(item.get("full_content") or item.get("content") or "")
         result.append({
             "doc_id": metadata.get("doc_id", ""),
             "source_type": metadata.get("source_type", ""),
-            "content": item.get("content", ""),
+            "content": full_content,
+            "full_content": full_content,
             "metadata": metadata,
             "similarity": item.get("similarity", 0),
             "rank": item.get("rank", idx),

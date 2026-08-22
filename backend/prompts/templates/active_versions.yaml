@@ -4,7 +4,9 @@ active_versions:
   anime_description_search: v1
   evidence_answering: rag-v1
   opinion_report: rag-v2-injection-guard
-  recommendation: rag-v6-bounded-reasons
+  recommendation: rag-v8-soft-reason-length
+  recommendation_chat: v1
   recommendation_followup: v1
+  recommendation_image: v1
   recommendation_intent: v1
   watch_guide: v1

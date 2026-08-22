@@ -12,6 +12,7 @@ from backend.agents.prompt_security import (
     inspect_untrusted_text,
     sanitize_comment_groups,
     sanitize_evidence_map,
+    sanitize_search_result,
 )
 from backend.agents.recommend_graph import (
     collect_preferences,
@@ -93,6 +94,31 @@ class PromptSecurityTest(unittest.TestCase):
             cleaned[1][0]["metadata"]["security"]["trust_level"],
             "untrusted",
         )
+        self.assertEqual(
+            cleaned[1][0]["full_content"],
+            "角色成长自然，音乐表现也很好。",
+        )
+
+    def test_tool_search_result_only_exposes_evidence_excerpt(self):
+        result = sanitize_search_result(
+            {
+                "evidence": [
+                    {
+                        "doc_id": "safe-1",
+                        "content": "普通背景说明。音乐舞台体现了角色成长。",
+                        "metadata": {},
+                    }
+                ]
+            },
+            query="角色成长",
+            anime_name="音乐番剧",
+            topics=["音乐"],
+        )
+
+        evidence = result["evidence"][0]
+        self.assertIn("evidence_excerpt", evidence)
+        self.assertNotIn("content", evidence)
+        self.assertNotIn("full_content", evidence)
 
     def test_tool_comment_injection_is_removed_from_opinion_context(self):
         cleaned, diagnostics = sanitize_comment_groups(
@@ -221,9 +247,20 @@ class PromptSecurityTest(unittest.TestCase):
         diagnostics = {
             "modes": ["live_database"],
             "candidate_count": 1,
-            "covered_candidates": 0,
-            "raw_evidence_count": 0,
-            "evidence_insufficient": True,
+            "covered_candidates": 1,
+            "raw_evidence_count": 1,
+            "evidence_insufficient": False,
+        }
+        evidence = {
+            "doc_id": "anime:1:comment:1",
+            "source_type": "comment",
+            "content": "角色成长自然，证据归属明确。",
+            "full_content": "角色成长自然，证据归属明确。",
+            "metadata": {
+                "doc_id": "anime:1:comment:1",
+                "anime_id": 1,
+                "source_type": "comment",
+            },
         }
         graph = create_recommendation_graph(InMemorySaver())
         with (
@@ -237,7 +274,7 @@ class PromptSecurityTest(unittest.TestCase):
             ),
             patch(
                 "backend.agents.recommend_graph.retrieve_candidate_evidence",
-                return_value=({1: []}, diagnostics),
+                return_value=({1: [evidence]}, diagnostics),
             ),
             patch(
                 "backend.agents.recommend_graph.get_chat_model",

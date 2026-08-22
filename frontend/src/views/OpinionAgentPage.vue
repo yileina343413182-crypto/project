@@ -153,7 +153,8 @@ import {
   getAgentSession,
   getAgentSessions,
   getAgentTask,
-  getAnimeList
+  getAnimeList,
+  streamAgentTask
 } from '../api'
 import AgentSteps from '../components/agent/AgentSteps.vue'
 import OpinionReport from '../components/agent/OpinionReport.vue'
@@ -207,6 +208,9 @@ const emptyStateDescription = computed(() => {
 
 let activeTaskId = null
 let pollTimer = null
+let streamController = null
+let streamResultLoading = false
+let reportSectionTimers = []
 let pollCount = 0
 let submitVersion = 0
 let sessionLoadVersion = 0
@@ -218,6 +222,13 @@ function stopPolling() {
     clearTimeout(pollTimer)
     pollTimer = null
   }
+  if (streamController) {
+    streamController.abort()
+    streamController = null
+  }
+  streamResultLoading = false
+  for (const timer of reportSectionTimers) clearTimeout(timer)
+  reportSectionTimers = []
   activeTaskId = null
 }
 
@@ -354,6 +365,7 @@ async function selectSession(id) {
       pollCount = 0
       taskStatus.value = `任务状态：${detail.active_task.current_step || detail.active_task.status}`
       emptyStateKind.value = 'pending'
+      startTaskStream(detail.active_task.task_id, detail.id, submitVersion)
       pollTask(detail.active_task.task_id, detail.id, submitVersion)
     }
     await nextTick()
@@ -418,15 +430,106 @@ async function removeSession(session) {
   }
 }
 
-function applyCompletedTask(task) {
+function applyCompletedTask(task, progressive = false, submission = submitVersion) {
   const payload = task.result && typeof task.result === 'object' ? task.result : {}
-  report.value = payload.report && typeof payload.report === 'object' ? payload.report : null
-  steps.value = Array.isArray(payload.agent_steps)
+  const finalReport = payload.report && typeof payload.report === 'object' ? payload.report : null
+  const finalSteps = Array.isArray(payload.agent_steps)
     ? payload.agent_steps
     : (Array.isArray(payload.report?.agent_steps) ? payload.report.agent_steps : [])
   activeAnime.value = payload.anime || activeAnime.value
-  taskStatus.value = report.value ? '诊断报告已生成' : '任务已完成，但未返回有效报告'
-  emptyStateKind.value = report.value ? 'new' : 'invalid'
+  if (!progressive || !finalReport) {
+    report.value = finalReport
+    steps.value = finalSteps
+    taskStatus.value = report.value ? '诊断报告已生成' : '任务已完成，但未返回有效报告'
+    emptyStateKind.value = report.value ? 'new' : 'invalid'
+    return
+  }
+
+  report.value = {
+    positive_points: [],
+    negative_points: [],
+    topic_insights: [],
+    risk_points: [],
+    operation_suggestions: [],
+    representative_comments: {}
+  }
+  steps.value = []
+  emptyStateKind.value = 'new'
+  taskStatus.value = '报告已完成校验，正在分段呈现'
+  const groups = [
+    ['summary', 'sentiment_overview', 'fallback'],
+    ['positive_points', 'negative_points', 'topic_insights'],
+    ['risk_points', 'audience_profile', 'operation_suggestions'],
+    ['representative_comments'],
+    ['evidence_refs', 'retrieval_evidence', 'prompt_trace', 'agent_steps']
+  ]
+  groups.forEach((keys, index) => {
+    const timer = window.setTimeout(() => {
+      if (disposed || submission !== submitVersion) return
+      const additions = {}
+      for (const key of keys) {
+        if (Object.prototype.hasOwnProperty.call(finalReport, key)) additions[key] = finalReport[key]
+      }
+      report.value = { ...report.value, ...additions }
+      if (index === groups.length - 1) {
+        report.value = finalReport
+        steps.value = finalSteps
+        taskStatus.value = '诊断报告已生成'
+      }
+    }, index * 120)
+    reportSectionTimers.push(timer)
+  })
+}
+
+async function applyStreamResult(taskId, taskSessionId, submission) {
+  if (streamResultLoading || !pollIsCurrent(taskId, taskSessionId, submission)) return
+  streamResultLoading = true
+  try {
+    const task = await getAgentTask(taskId)
+    if (!pollIsCurrent(taskId, taskSessionId, submission)) return
+    if (task.status === 'succeeded') {
+      stopPolling()
+      setSessionTask(taskSessionId, null)
+      loading.value = false
+      applyCompletedTask(task, true, submission)
+      loadSessions(false)
+    } else if (task.status === 'failed') {
+      stopPolling()
+      setSessionTask(taskSessionId, null)
+      loading.value = false
+      error.value = task.error || '舆情诊断任务失败'
+      taskStatus.value = '任务执行失败'
+      emptyStateKind.value = 'failed'
+      loadSessions(false)
+    }
+  } catch {
+    // 流式快捷读取失败时继续依赖原有轮询。
+  } finally {
+    streamResultLoading = false
+  }
+}
+
+function startTaskStream(taskId, taskSessionId, submission) {
+  if (streamController) streamController.abort()
+  const controller = new AbortController()
+  streamController = controller
+  streamAgentTask(taskId, {
+    signal: controller.signal,
+    onEvent(event) {
+      if (controller !== streamController || !pollIsCurrent(taskId, taskSessionId, submission)) return
+      if (event.type === 'phase') {
+        taskStatus.value = event.message || 'Agent 正在分析'
+      } else if (event.type === 'task_started' && Number(event.attempt || 1) > 1) {
+        taskStatus.value = '任务已恢复，正在重新生成报告'
+      } else if (['result_ready', 'task_completed', 'task_failed'].includes(event.type)) {
+        applyStreamResult(taskId, taskSessionId, submission)
+      }
+    }
+  }).catch((streamError) => {
+    if (streamError?.name !== 'AbortError') {
+      // 流式连接是增强能力；失败时轮询保持原有可用性。
+    }
+  })
 }
 
 function pollIsCurrent(taskId, taskSessionId, submission) {
@@ -531,6 +634,7 @@ async function runAnalysis() {
     activeSessionTime.value = new Date().toISOString()
     taskStatus.value = '任务已提交，正在分析'
     loadSessions(false)
+    startTaskStream(data.task_id, data.session_id, submission)
     await pollTask(data.task_id, data.session_id, submission)
   } catch (err) {
     if (disposed || submission !== submitVersion) return

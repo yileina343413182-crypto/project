@@ -10,6 +10,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from backend.agents.evidence_excerpt import select_evidence_excerpt
+
 
 _CONTROL_CHARS = re.compile(
     r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\u200b-\u200f\u202a-\u202e\u2066-\u2069]"
@@ -113,10 +115,13 @@ def sanitize_evidence_map(
     for anime_id, items in (evidence_map or {}).items():
         safe_items = []
         for item in items or []:
+            full_content = str(
+                item.get("full_content") or item.get("content") or ""
+            )
             inspection = inspect_untrusted_text(
-                item.get("content", ""),
+                full_content,
                 source="rag_evidence",
-                max_chars=1200,
+                max_chars=max(1, len(full_content)),
             )
             flags.update(inspection["flags"])
             if inspection["flags"]:
@@ -134,6 +139,7 @@ def sanitize_evidence_map(
                 {
                     **item,
                     "content": inspection["sanitized_text"],
+                    "full_content": inspection["sanitized_text"],
                     "metadata": metadata,
                 }
             )
@@ -145,14 +151,42 @@ def sanitize_evidence_map(
     }
 
 
-def sanitize_search_result(result: dict) -> dict:
+def sanitize_search_result(
+    result: dict,
+    *,
+    query: str = "",
+    anime_name: str = "",
+    topics: list | None = None,
+) -> dict:
     """清洗单次 RAG 搜索结果并把安全诊断附加到返回值。"""
     payload = dict(result or {})
     evidence = payload.get("evidence")
     if not isinstance(evidence, list):
         return payload
     cleaned, diagnostics = sanitize_evidence_map({0: evidence})
-    payload["evidence"] = cleaned[0]
+    prompt_evidence = []
+    remaining = 1200
+    pending = len(cleaned[0])
+    for item in cleaned[0]:
+        allowance = min(remaining, max(160, remaining // max(1, pending)))
+        excerpt = select_evidence_excerpt(
+            item.get("full_content") or item.get("content") or "",
+            query=query,
+            anime_name=anime_name,
+            topics=topics,
+            target_chars=allowance,
+            remaining_chars=allowance,
+        )
+        pending -= 1
+        if not excerpt:
+            continue
+        prompt_evidence.append({
+            key: value
+            for key, value in item.items()
+            if key not in {"content", "full_content"}
+        } | {"evidence_excerpt": excerpt})
+        remaining -= len(excerpt)
+    payload["evidence"] = prompt_evidence
     payload["security"] = diagnostics
     return payload
 

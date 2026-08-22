@@ -10,7 +10,7 @@
 > `backend/prompts/templates/*.yaml` 形式的旧平铺模板。Prompt 的版本、模板哈希和
 > 安全诊断会随 Agent 任务写入 `prompt_trace`。
 >
-> 当前业务持久化已统一到 SQLAlchemy 2.0 的 17 张 ORM 表。生产/本机运行优先
+> 当前业务持久化已统一到 SQLAlchemy 2.0 的 18 张 ORM 表。生产/本机运行优先
 > 使用 MySQL；SQLite 保留为迁移源、测试隔离数据库和未配置 MySQL 时的兼容后端。
 > Agent 后台任务由 Redis + Celery Worker 执行，推荐图 Checkpoint 生产环境使用 Redis。
 
@@ -149,7 +149,7 @@ Agent 生产运行与故障恢复见
 | PyTorch | 2.11.0 | TextCNN / BERT 训练与推理 |
 | transformers | 4.46.3 | bert-base-chinese 预训练模型 |
 | gensim | 4.4.0 | LDA 主题建模 |
-| SQLAlchemy | 2.0.51 | 17 表统一 ORM、同步/异步事务边界 |
+| SQLAlchemy | 2.0.51 | 18 表统一 ORM、同步/异步事务边界 |
 | MySQL | 8.0+ | 默认业务数据库（PyMySQL + aiomysql） |
 | SQLite | 内置 | 迁移源、测试隔离与兼容回退 |
 | Alembic | 1.18.5 | MySQL Schema 迁移 |
@@ -386,6 +386,9 @@ Agent 生产运行与故障恢复见
 | POST | `/api/recommend` | `{"query":"用户输入"}` → 动漫推荐卡片 + LLM 生成理由 |
 | POST | `/api/agent/recommend/start` | 启动推荐 Agent 2.0 异步会话；支持 `client_request_id` 幂等键 |
 | POST | `/api/agent/recommend/message` | 回答多级偏好问题；推荐完成后继续普通文本追问；同一会话严格串行 |
+| POST | `/api/agent/attachments/images` | 上传单张 JPEG/PNG/WebP 推荐参考图，最大 5 MB；返回附件 ID |
+| GET | `/api/agent/attachments/<attachment_id>/content` | 鉴权读取当前用户的图片附件 |
+| DELETE | `/api/agent/attachments/<attachment_id>` | 删除当前用户尚未绑定消息的图片附件 |
 | GET | `/api/agent/tasks/<task_id>` | 查询异步任务状态与结果 |
 | POST | `/api/agent/opinion/analyze` | 启动舆情诊断 Agent；支持 `client_request_id` 幂等键 |
 | GET | `/api/agent/watch-guides` | 分页读取当前用户的待看番剧指南摘要 |
@@ -528,7 +531,7 @@ flowchart LR
 - `RECOMMEND_TOOLS` 仅包含当前候选池内的只读查询工具，由
   `bind_tools + ToolNode` 执行。
 - `step_count`、`retry_count`、工具轮次和 `recursion_limit` 共同限制循环。
-- Redis Checkpointer 保存生产图节点状态；开发可降级到独立 SQLite 文件，它们都不属于 MySQL 的 17 张业务表。
+- Redis Checkpointer 保存生产图节点状态；开发可降级到独立 SQLite 文件，它们都不属于 MySQL 的 19 张业务表。
 - 高风险 Prompt 注入输入不触发工具规划，也不能写入持久化偏好。
 - LLM 产生的偏好只作为 `suggested` 返回；只有确定性解析结果可以写入
   `applied` 偏好。
@@ -551,7 +554,7 @@ flowchart LR
 | Provider | 模型 | Base URL |
 |----------|------|----------|
 | 智谱 AI（zhipu） | GLM-4-Flash | `https://open.bigmodel.cn/api/paas/v4` |
-| 通义千问（qwen） | qwen3-8b | `https://dashscope.aliyuncs.com/compatible-mode/v1` |
+| 通义千问（qwen） | qwen3.7-plus | `https://dashscope.aliyuncs.com/compatible-mode/v1` |
 
 **健壮性设计**：
 - LLM API 不可用（网络超时/无 API Key）时自动降级为本地模糊匹配，系统始终可用
@@ -590,12 +593,12 @@ Prompt 版本管理细节见
 `DATABASE_URL` 或 `MYSQL_*` 环境变量构造 MySQL 连接；未配置 MySQL 时才使用
 `data/anime_sentiment.db` 作为 SQLite 兼容后端。
 
-ORM 共包含 17 张业务表：
+ORM 共包含 19 张业务表：
 
 | 分组 | 数据表 | 主要用途 |
 |------|--------|----------|
 | 核心业务 | `users`、`anime`、`comments`、`topics`、`chat_history` | 用户、动漫、评论情感、LDA 主题和传统聊天历史 |
-| Agent | `agent_sessions`、`agent_messages`、`agent_tasks`、`user_preferences`、`watch_guides` | Agent 会话、多轮消息、后台任务、长期偏好和用户待看指南 |
+| Agent | `agent_sessions`、`agent_messages`、`agent_tasks`、`agent_attachments`、`user_preferences`、`watch_guides`、`user_anime_statuses` | Agent 会话、多轮消息、后台任务、推荐图片附件、长期偏好、用户待看指南和观看状态 |
 | RAG | `rag_index_jobs`、`rag_documents`、`rag_active_collections`、`rag_collection_metadata` | 索引任务、可检索文档、活动集合和 Embedding 元数据 |
 | RAG 评估 | `rag_eval_cases`、`rag_eval_runs`、`rag_eval_items` | 评估用例、运行记录、指标和证据 |
 
@@ -604,11 +607,12 @@ ORM 共包含 17 张业务表：
 - JSON 字段在 MySQL 使用原生 JSON，在 SQLite 通过 SQLAlchemy 自动序列化。
 - `comments.sentiment_score` 和 `topics.weight` 在 MySQL 使用 `DOUBLE`，避免从 SQLite `REAL` 迁移时损失精度。
 - `PortableDateTime` 在 MySQL 使用原生 `DATETIME`，同时兼容旧 SQLite 文本时间。
+- 推荐图片安全重编码后保存在 `agent_attachments` 的 BLOB 中；任务、Redis 和消息元数据只保存附件 ID，删除会话时由数据库级联删除。
 - 外键统一使用级联或置空策略，并为评论查询、任务状态和 RAG 集合建立索引。
 - `agent_tasks.client_request_id` 防止客户端重试重复创建任务，`turn_seq` 保证会话内轮次有序；
   两个唯一索引均允许旧任务保留空值。
 - LangGraph Checkpoint 生产使用 Redis；开发可显式使用 `data/langgraph_checkpoints.db`，
-  两者都不属于上述 17 张业务表。
+  两者都不属于上述 19 张业务表。
 
 MySQL Schema 由 Alembic 管理；SQLite → MySQL 的一次性迁移和全量校验脚本位于
 `scripts/migrate_sqlite_to_mysql.py` 与 `scripts/verify_mysql_migration.py`。
@@ -682,7 +686,7 @@ project/
 │   ├── config.py                   # 全局配置（DB路径、端口、LLM Key、JWT密钥）
 │   ├── security.py                 # HS256 JWT 签发与认证依赖
 │   ├── database.py                 # 同步业务查询兼容入口
-│   ├── db/                         # 17 表 ORM、同步/异步 Session 与 Repository
+│   ├── db/                         # 18 表 ORM、同步/异步 Session 与 Repository
 │   ├── api/
 │   │   ├── auth.py                 # POST /register /login, GET /me（JWT 保护）
 │   │   ├── data.py                 # GET /anime/list, GET /comments/<id>（分页+情感过滤）
@@ -1031,7 +1035,7 @@ python -m topic.lda_model --anime_id 1 --find_best --min_topics 3 --max_topics 1
 
 ## 数据库结构速览
 
-当前 Schema 为 MySQL 8 上的 17 张 SQLAlchemy 业务表；SQLite 保留相同映射以
+当前 Schema 为 MySQL 8 上的 18 张 SQLAlchemy 业务表；SQLite 保留相同映射以
 支持迁移和测试。完整分组、兼容规则和迁移方式见[第 14 节](#14-数据库设计)，
 实际列定义以 `backend/db/models.py` 为准。
 
@@ -1054,7 +1058,7 @@ python batch_predict.py --model bert --anime_id 1
 # 仅重新计算所有动漫的 LDA 主题
 python prepare_data.py --topics-only
 
-# 核验 SQLite → MySQL 的 17 表全量内容
+# 核验 SQLite → MySQL 的 18 表全量内容
 python scripts/verify_mysql_migration.py
 
 # 重建 RAG 索引
@@ -1090,7 +1094,7 @@ docker compose -f compose.agent.yml up -d
 | 爬虫 | requests + BeautifulSoup4 |
 | 安全 | bcrypt 密码哈希 + JWT 无状态认证 |
 | Agent / RAG | LangGraph + Chroma + 数据库关键词检索 + RRF + qwen3-rerank |
-| LLM 集成 | Qwen qwen3-8b / OpenAI / 智谱 GLM-4-Flash（OpenAI 兼容接口，自动降级） |
+| LLM 集成 | Qwen qwen3.7-plus / OpenAI / 智谱 GLM-4-Flash（OpenAI 兼容接口，自动降级） |
 
 ---
 
@@ -1133,10 +1137,11 @@ docker compose -f compose.agent.yml up -d
 1. **安全检查**：检查当前输入与最近会话历史。
 2. **多级偏好补全**：确定性提取并持久化用户明确回答的偏好。
 3. **候选与证据**：本地排序后检索评论证据，并过滤间接 Prompt 注入。
-4. **受限工具循环**：模型只能选择当前候选池内的只读工具。
-5. **结构化校验**：候选 ID、证据引用和返回 Schema 必须通过后端校验。
-6. **降级与恢复**：节点异常从 Checkpointer 恢复；超限或模型失败走本地结果。
-7. **可追溯结果**：保存 Prompt 版本、模板哈希、证据、执行步骤和安全诊断。
+4. **可选图片理解**：单图先校验格式、大小和像素并去除 EXIF，再由当前统一的 `LLM_MODEL` 提取受控视觉上下文；无需配置第二个视觉模型。
+5. **受限工具循环**：模型只能选择当前候选池内的只读工具。
+6. **结构化校验**：候选 ID、证据引用和返回 Schema 必须通过后端校验。
+7. **降级与恢复**：节点异常从 Checkpointer 恢复；超限或模型失败走本地结果。
+8. **可追溯结果**：保存 Prompt 版本、模板哈希、证据、执行步骤和安全诊断。
 
 ---
 

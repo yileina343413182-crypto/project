@@ -1,4 +1,4 @@
-"""Copy the 17 business tables from legacy SQLite into an empty MySQL schema.
+"""Copy the 18 business tables from legacy SQLite into an empty MySQL schema.
 
 The LangGraph checkpoint database is intentionally excluded. Run Alembic against
 the MySQL target before this script. The copy is one transaction and refuses a
@@ -197,7 +197,7 @@ def migrate_business_tables(source: Engine, target: Engine, chunk_size: int = 10
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="迁移 17 张业务表：SQLite -> 空 MySQL schema")
+    parser = argparse.ArgumentParser(description="迁移 19 张业务表：SQLite -> 空 MySQL schema")
     parser.add_argument("--source", default=DB_PATH, help="源 SQLite 文件路径")
     parser.add_argument(
         "--target-url",

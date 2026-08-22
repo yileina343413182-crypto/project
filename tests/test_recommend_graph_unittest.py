@@ -13,11 +13,11 @@ from backend.agents.fallback import build_recommendation_fallback
 from backend.agents import recommend_graph as recommend_graph_module
 from backend.agents.recommend_graph import (
     QUESTIONNAIRE_SLOTS,
+    _search_query,
+    build_candidates,
     create_recommendation_graph,
-    repair,
     retrieve_evidence,
     route_evidence,
-    route_repair,
     route_validation,
     run_recommendation_graph,
     validate,
@@ -29,6 +29,20 @@ from backend.agents.schemas import (
     RetrievalEvidence,
 )
 from backend.agents.tools import RECOMMEND_TOOLS
+
+
+def _retrieval_evidence(anime_id=1):
+    return {
+        "doc_id": f"anime:{anime_id}:comment:1",
+        "source_type": "comment",
+        "content": "角色成长自然，评论证据归属明确。",
+        "full_content": "角色成长自然，评论证据归属明确。",
+        "metadata": {
+            "doc_id": f"anime:{anime_id}:comment:1",
+            "anime_id": anime_id,
+            "source_type": "comment",
+        },
+    }
 
 
 class RecommendationCheckpointerTest(unittest.TestCase):
@@ -209,13 +223,13 @@ class RecommendationGraphTest(unittest.TestCase):
             patch(
                 "backend.agents.recommend_graph.retrieve_candidate_evidence",
                 return_value=(
-                    {1: []},
+                    {1: [_retrieval_evidence()]},
                     {
                         "modes": ["live_database"],
                         "candidate_count": 1,
-                        "covered_candidates": 0,
-                        "raw_evidence_count": 0,
-                        "evidence_insufficient": True,
+                        "covered_candidates": 1,
+                        "raw_evidence_count": 1,
+                        "evidence_insufficient": False,
                     },
                 ),
             ),
@@ -265,14 +279,12 @@ class RecommendationGraphTest(unittest.TestCase):
             ],
         )
 
-    def test_recommendation_reason_uses_trimmed_unicode_length_contract(self):
+    def test_recommendation_reason_length_is_not_a_validation_constraint(self):
         candidates = [{"id": 1, "name": "测试动画"}]
-        for length, is_valid in (
-            (RECOMMEND_REASON_MIN_CHARS - 1, False),
-            (RECOMMEND_REASON_MIN_CHARS, True),
-            (RECOMMEND_REASON_MAX_CHARS, True),
-            (RECOMMEND_REASON_MAX_CHARS + 1, False),
-        ):
+        for length in (1, RECOMMEND_REASON_MIN_CHARS - 1,
+                       RECOMMEND_REASON_MIN_CHARS,
+                       RECOMMEND_REASON_MAX_CHARS,
+                       RECOMMEND_REASON_MAX_CHARS + 100):
             with self.subTest(length=length):
                 data = {
                     "recommendations": [
@@ -286,17 +298,94 @@ class RecommendationGraphTest(unittest.TestCase):
                 cleaned, errors = _validate_recommendation(
                     data,
                     candidates,
-                    {1: []},
+                    {1: [_retrieval_evidence()]},
                 )
 
-                self.assertEqual(
-                    errors == [],
-                    is_valid,
-                )
+                self.assertEqual(errors, [])
                 self.assertEqual(
                     len(cleaned["recommendations"][0]["reason"]),
                     length,
                 )
+
+    def test_recommendation_reason_still_rejects_empty_content(self):
+        _cleaned, errors = _validate_recommendation(
+            {"recommendations": [{"anime_id": 1, "reason": "  ", "evidence_refs": []}]},
+            [{"id": 1, "name": "测试动画"}],
+            {1: [_retrieval_evidence()]},
+        )
+
+        self.assertIn("anime_id 1 reason must not be empty", errors)
+
+    def test_validation_normalizes_semantically_valid_but_dirty_match_tags(self):
+        cleaned, errors = _validate_recommendation(
+            {
+                "recommendations": [{
+                    "anime_id": 1,
+                    "reason": "有效理由",
+                    "match_tags": [
+                        "]匹配：世界",
+                        "匹配: 魔法",
+                        "]口碑",
+                        "口碑依据＋",
+                        "]评论检索证据+",
+                    ],
+                    "evidence_refs": [],
+                }]
+            },
+            [{"id": 1, "name": "测试动画"}],
+            {1: [_retrieval_evidence()]},
+        )
+
+        self.assertEqual(errors, [])
+        self.assertEqual(
+            cleaned["recommendations"][0]["match_tags"],
+            ["匹配：世界", "匹配：魔法", "口碑", "评论证据"],
+        )
+
+    def test_candidate_build_uses_raw_query_instead_of_expanded_preferences(self):
+        state = {
+            "query": "少女乐队，京阿尼旗下",
+            "safe_query": "少女乐队，京阿尼旗下",
+            "search_query": "少女乐队，京阿尼旗下 战斗 群像 热血",
+            "user_id": 7,
+        }
+        with patch(
+            "backend.agents.recommend_graph.build_candidate_pool",
+            return_value=[],
+        ) as candidate_pool:
+            build_candidates(state)
+
+        self.assertEqual(candidate_pool.call_args.args[0], state["safe_query"])
+
+    def test_search_query_does_not_duplicate_long_term_preferences(self):
+        query = "少女乐队，京阿尼旗下"
+
+        self.assertEqual(
+            _search_query(query, {"preferred_genres": ["战斗", "群像"]}),
+            query,
+        )
+
+    def test_validation_rejects_ranked_backup_outside_eligible_candidates(self):
+        result = validate({
+            "candidates": [
+                {"id": 1, "name": "有证据候选"},
+                {"id": 2, "name": "无证据备用"},
+            ],
+            "eligible_candidates": [{"id": 1, "name": "有证据候选"}],
+            "evidence_map": {1: [{"doc_id": "comment:1"}]},
+            "llm_data": {
+                "need_clarification": False,
+                "recommendations": [{
+                    "anime_id": 2,
+                    "reason": "理" * RECOMMEND_REASON_MIN_CHARS,
+                    "evidence_refs": [],
+                }],
+            },
+        })
+
+        self.assertTrue(
+            any("outside candidate pool" in error for error in result["validation_errors"])
+        )
 
     def test_retrieval_evidence_preserves_hybrid_ranking_diagnostics(self):
         evidence = RetrievalEvidence(
@@ -342,6 +431,35 @@ class RecommendationGraphTest(unittest.TestCase):
             reason_chars = len(recommendation.reason.strip())
             self.assertGreaterEqual(reason_chars, RECOMMEND_REASON_MIN_CHARS)
             self.assertLessEqual(reason_chars, RECOMMEND_REASON_MAX_CHARS)
+
+    def test_local_fallback_distinguishes_available_evidence_from_missing_fields(self):
+        result = build_recommendation_fallback(
+            "想看科幻群像",
+            [
+                {
+                    "id": 1,
+                    "name": "测试动画",
+                    "platform": "local",
+                    "final_score": 1.2,
+                    "topics": ["科幻/群像"],
+                    "sentiment": {"total": 10, "positive": 8, "neutral": 1, "negative": 1},
+                }
+            ],
+            {"preferred_genres": ["科幻"]},
+            evidence_map={
+                1: [
+                    {"doc_id": "comment:1", "source_type": "comment"},
+                    {"doc_id": "topic:1", "source_type": "topic"},
+                ]
+            },
+        )
+
+        reason = result.recommendations[0].reason
+        self.assertIn("已关联2条", reason)
+        self.assertIn("评论", reason)
+        self.assertIn("主题", reason)
+        self.assertNotIn("当前未关联到可引用的RAG条目", reason)
+        self.assertIn("现有证据未提供可靠作品关系映射", reason)
 
     def test_multilevel_questions_persist_answers_before_recommendation(self):
         turns = [
@@ -444,13 +562,13 @@ class RecommendationGraphTest(unittest.TestCase):
             patch(
                 "backend.agents.recommend_graph.retrieve_candidate_evidence",
                 return_value=(
-                    {1: []},
+                    {1: [_retrieval_evidence()]},
                     {
                         "modes": ["live_database"],
                         "candidate_count": 1,
-                        "covered_candidates": 0,
-                        "raw_evidence_count": 0,
-                        "evidence_insufficient": True,
+                        "covered_candidates": 1,
+                        "raw_evidence_count": 1,
+                        "evidence_insufficient": False,
                     },
                 ),
             ),
@@ -469,7 +587,7 @@ class RecommendationGraphTest(unittest.TestCase):
         self.assertFalse(payload["fallback"])
         recommendation = payload["result"]["recommendations"][0]
         self.assertEqual(recommendation["anime_id"], 1)
-        self.assertEqual(recommendation["platform"], "local")
+        self.assertEqual(recommendation["platform"], "")
         self.assertEqual(recommendation["comment_count"], 20)
         self.assertEqual(recommendation["evidence"]["sentiment"]["positive"], 3)
         self.assertEqual(recommendation["evidence"]["topics"], ["成长"])
@@ -486,7 +604,7 @@ class RecommendationGraphTest(unittest.TestCase):
         )
         self.assertEqual(
             payload["result"]["prompt_trace"]["template_version"],
-            "rag-v6-bounded-reasons",
+            "rag-v8-soft-reason-length",
         )
         self.assertEqual(
             len(payload["result"]["prompt_trace"]["template_hash"]),
@@ -496,7 +614,7 @@ class RecommendationGraphTest(unittest.TestCase):
         self.assertIn("validate_recommendation", step_names)
         self.assertIn("finalize_recommendation", step_names)
 
-    def test_short_reason_is_repaired_then_revalidated(self):
+    def test_short_reason_passes_without_repair(self):
         state = {
             "candidates": [{"id": 1, "name": "测试动画"}],
             "evidence_map": {1: []},
@@ -516,30 +634,8 @@ class RecommendationGraphTest(unittest.TestCase):
             },
         }
         first_validation = validate(state)
-        self.assertEqual(route_validation(first_validation), "repair")
-        self.assertIn("got 2", first_validation["validation_errors"][0])
-
-        repaired_response = {
-            "need_clarification": False,
-            "recommendations": [
-                {
-                    "anime_id": 1,
-                    "reason": "修" * RECOMMEND_REASON_MIN_CHARS,
-                    "evidence_refs": [],
-                }
-            ],
-            "preference_updates": {},
-        }
-        with patch(
-            "backend.agents.recommend_graph.get_chat_model",
-            return_value=FakeStructuredModel(repaired_response),
-        ):
-            repaired = repair({**state, **first_validation})
-
-        self.assertEqual(route_repair(repaired), "validate")
-        second_validation = validate({**state, **repaired})
-        self.assertEqual(second_validation["validation_errors"], [])
-        self.assertEqual(route_validation({**repaired, **second_validation}), "success")
+        self.assertEqual(first_validation["validation_errors"], [])
+        self.assertEqual(route_validation(first_validation), "success")
 
     def test_evidence_exception_is_converted_to_local_fallback_state(self):
         state = {
@@ -615,13 +711,13 @@ class RecommendationGraphTest(unittest.TestCase):
             patch(
                 "backend.agents.recommend_graph.retrieve_candidate_evidence",
                 return_value=(
-                    {1: []},
+                    {1: [_retrieval_evidence()]},
                     {
                         "modes": ["live_database"],
                         "candidate_count": 1,
-                        "covered_candidates": 0,
-                        "raw_evidence_count": 0,
-                        "evidence_insufficient": True,
+                        "covered_candidates": 1,
+                        "raw_evidence_count": 1,
+                        "evidence_insufficient": False,
                     },
                 ),
             ),
@@ -646,7 +742,7 @@ class RecommendationGraphTest(unittest.TestCase):
         step_names = [step["name"] for step in payload["agent_steps"]]
         self.assertIn("execute_recommendation_tools", step_names)
 
-    def test_tool_loop_limit_routes_to_fallback(self):
+    def test_tool_loop_limit_continues_to_structured_generation(self):
         for slot in QUESTIONNAIRE_SLOTS:
             self.preferences[slot] = [f"value-{slot}"]
         repeated_plan = RepeatingToolPlanningModel(
@@ -665,6 +761,19 @@ class RecommendationGraphTest(unittest.TestCase):
                 "comments": [],
             }
         ]
+        response = {
+            "need_clarification": False,
+            "clarifying_question": "",
+            "recommendations": [
+                {
+                    "anime_id": 1,
+                    "reason": "理" * RECOMMEND_REASON_MIN_CHARS,
+                    "match_tags": ["匹配"],
+                    "evidence_refs": [],
+                }
+            ],
+            "preference_updates": {},
+        }
         with (
             patch(
                 "backend.agents.recommend_graph.get_user_preferences",
@@ -677,20 +786,26 @@ class RecommendationGraphTest(unittest.TestCase):
             patch(
                 "backend.agents.recommend_graph.retrieve_candidate_evidence",
                 return_value=(
-                    {1: []},
+                    {1: [_retrieval_evidence()]},
                     {
                         "modes": ["live_database"],
                         "candidate_count": 1,
-                        "covered_candidates": 0,
-                        "raw_evidence_count": 0,
-                        "evidence_insufficient": True,
+                        "covered_candidates": 1,
+                        "raw_evidence_count": 1,
+                        "evidence_insufficient": False,
                     },
                 ),
             ),
             patch(
                 "backend.agents.recommend_graph.get_chat_model",
-                return_value=repeated_plan,
-            ),
+                side_effect=[
+                    *(
+                        [repeated_plan]
+                        * recommend_graph_module.RECOMMEND_TOOL_MAX_ROUNDS
+                    ),
+                    FakeStructuredModel(response),
+                ],
+            ) as chat_model,
         ):
             payload = run_recommendation_graph(
                 7,
@@ -699,9 +814,19 @@ class RecommendationGraphTest(unittest.TestCase):
                 graph=self.graph,
             )
 
-        self.assertTrue(payload["fallback"])
+        self.assertFalse(payload["fallback"])
         self.assertEqual(payload["result"]["tool_rounds"], 3)
-        self.assertIn("tool loop limit", payload["result"]["fallback_reason"])
+        self.assertEqual(
+            chat_model.call_count,
+            recommend_graph_module.RECOMMEND_TOOL_MAX_ROUNDS + 1,
+        )
+        self.assertEqual(payload["result"]["fallback_reason"], "")
+        self.assertTrue(payload["result"]["context_budget"]["tool_limit_reached"])
+        guard_step = next(
+            step for step in payload["agent_steps"]
+            if step["name"] == "tool_loop_guard"
+        )
+        self.assertEqual(guard_step["status"], "degraded")
         preference_updates = payload["result"]["preference_updates"]
         self.assertEqual(preference_updates["applied"], {})
         self.assertEqual(preference_updates["last_query"], "继续推荐")

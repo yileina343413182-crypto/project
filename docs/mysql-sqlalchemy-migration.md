@@ -2,7 +2,7 @@
 
 ## 本阶段采用的结构
 
-- 17 张业务表由一套 SQLAlchemy ORM 模型维护。
+- 19 张业务表由一套 SQLAlchemy ORM 模型维护。
 - FastAPI 请求使用 `AsyncSession` 与 `aiomysql`，每个请求一个会话。
 - Agent 线程、RAG 重任务、爬虫和离线脚本继续使用同步 Session 与 PyMySQL，每个线程/任务一个会话。
 - 普通 CRUD 使用 ORM；批量写入、聚合和方言 upsert 使用 SQLAlchemy Core。
@@ -20,7 +20,7 @@
    & '..\.venv\Scripts\python.exe' -m alembic upgrade head
    ```
 
-5. 在服务停止写入期间迁移 17 张业务表：
+5. 在服务停止写入期间迁移 19 张业务表：
 
    ```powershell
    & '..\.venv\Scripts\python.exe' 'scripts\migrate_sqlite_to_mysql.py'

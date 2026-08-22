@@ -9,10 +9,10 @@ from __future__ import annotations
 import json
 from datetime import date, datetime
 
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.db.models import Anime, ChatHistory, Comment, Topic, User, WatchGuide
+from backend.db.models import Anime, ChatHistory, Comment, Topic, User, UserAnimeStatus, WatchGuide
 
 
 def _date_value(value):
@@ -196,6 +196,60 @@ async def delete_watch_guide(session: AsyncSession, guide_id: int, user_id: int)
         )
     )
     return result.rowcount
+
+
+# ===== 番剧观看状态 =====
+
+async def list_user_anime_statuses(session: AsyncSession, user_id: int) -> list[dict]:
+    """返回全部动漫；没有显式记录的作品默认是未看过。"""
+    rows = (
+        await session.execute(
+            select(Anime.id, Anime.name, UserAnimeStatus.status)
+            .outerjoin(
+                UserAnimeStatus,
+                and_(
+                    UserAnimeStatus.anime_id == Anime.id,
+                    UserAnimeStatus.user_id == int(user_id),
+                ),
+            )
+            .order_by(Anime.id)
+        )
+    ).all()
+    return [
+        {"anime_id": int(anime_id), "name": name, "status": status or "unwatched"}
+        for anime_id, name, status in rows
+    ]
+
+
+async def set_user_anime_status(
+    session: AsyncSession,
+    user_id: int,
+    anime_id: int,
+    status: str,
+) -> dict | None:
+    """设置单部动漫状态；未看过使用缺省值，不保留冗余记录。"""
+    anime = await session.get(Anime, int(anime_id))
+    if anime is None:
+        return None
+
+    key = (int(user_id), int(anime_id))
+    record = await session.get(UserAnimeStatus, key)
+    if status == "unwatched":
+        if record is not None:
+            await session.delete(record)
+    elif record is None:
+        session.add(
+            UserAnimeStatus(
+                user_id=int(user_id),
+                anime_id=int(anime_id),
+                status=status,
+            )
+        )
+    else:
+        record.status = status
+        record.updated_at = datetime.now()
+    await session.flush()
+    return {"anime_id": int(anime.id), "name": anime.name, "status": status}
 
 
 # ===== 动漫、评论与分析结果查询 =====

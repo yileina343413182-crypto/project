@@ -48,6 +48,13 @@ class _PlainModel:
         return type("Response", (), {"content": "这是一段详细的普通文本回答。"})()
 
 
+class _StreamingModel:
+    def stream(self, messages):
+        self.messages = messages
+        for content in ("这是", "流式", "回答。"):
+            yield type("Chunk", (), {"content": content})()
+
+
 class RecommendationFollowupTest(unittest.TestCase):
     def test_clarification_does_not_switch_to_conversation_mode(self):
         context = extract_last_recommendation_context(
@@ -102,6 +109,25 @@ class RecommendationFollowupTest(unittest.TestCase):
         self.assertTrue(payload["fallback"])
         self.assertIn("CLANNAD ～AFTER STORY～", payload["answer"])
         self.assertIn("已保存的详细推荐理由", payload["answer"])
+
+    def test_followup_streams_text_and_keeps_complete_final_answer(self):
+        context = extract_last_recommendation_context([_recommendation_message()])
+        deltas = []
+
+        with patch(
+            "backend.agents.recommend_followup.get_chat_model",
+            return_value=_StreamingModel(),
+        ):
+            payload = run_recommendation_followup(
+                "继续介绍",
+                [_recommendation_message()],
+                context,
+                on_text_delta=deltas.append,
+            )
+
+        self.assertEqual(deltas, ["这是", "流式", "回答。"])
+        self.assertEqual(payload["answer"], "这是流式回答。")
+        self.assertFalse(payload["fallback"])
 
     def test_worker_routes_completed_session_to_plain_followup(self):
         context = extract_last_recommendation_context([_recommendation_message()])

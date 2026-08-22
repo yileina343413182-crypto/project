@@ -35,8 +35,11 @@ from backend.agents.prompt_security import (
     sanitize_preference_suggestions,
 )
 from backend.agents.recommend_context import (
+    evidence_field_coverage,
+    evidence_field_gaps,
     pack_recommendation_context,
     retrieve_candidate_evidence,
+    verified_platform_availability,
 )
 from backend.agents.schemas import AgentStep, RecommendationResponseSchema
 from backend.agents.tools import RECOMMEND_TOOLS, build_candidate_pool, timed_step
@@ -55,6 +58,7 @@ from backend.config import (
     RECOMMEND_LLM_REPAIR_MAX_TOKENS,
     RECOMMEND_LLM_REPAIR_RETRIES,
     RECOMMEND_LLM_TIMEOUT,
+    RECOMMEND_EVIDENCE_CANDIDATES,
     RECOMMEND_REDIS_MAX_CONNECTIONS,
     RECOMMEND_TOOL_MAX_ROUNDS,
 )
@@ -68,6 +72,8 @@ class AgentState(TypedDict, total=False):
 
     user_id: int
     query: str
+    excluded_anime_ids: list[int]
+    force_recommendation: bool
     safe_query: str
     search_query: str
     history: list[dict]
@@ -79,6 +85,7 @@ class AgentState(TypedDict, total=False):
     next_preference_slot: str
     preference_progress: dict[str, Any]
     candidates: list[dict]
+    eligible_candidates: list[dict]
     evidence_map: dict[int, list[dict]]
     evidence_coverage: dict[str, Any]
     packed_candidates: list[dict]
@@ -306,10 +313,15 @@ def _preference_update_payload(
 
 
 def _search_query(query: str, preferences: dict) -> str:
-    parts = [query]
-    for slot in QUESTIONNAIRE_SLOTS:
-        parts.extend(str(value) for value in preferences.get(slot, [])[-5:])
-    return " ".join(_unique(parts))
+    """保持本轮问题原文；长期偏好通过独立字段只进入一次。"""
+    return str(query or "").strip()
+
+
+def _eligible_candidates(state: AgentState) -> list[dict]:
+    """实际图状态使用 eligible；兼容旧检查点和直接调用的单元测试。"""
+    if "eligible_candidates" in state:
+        return state.get("eligible_candidates", [])
+    return state.get("candidates", [])[:RECOMMEND_EVIDENCE_CANDIDATES]
 
 
 # ===== 阶段一：输入安全检查与偏好问卷 =====
@@ -446,6 +458,8 @@ def assess_preferences(state: AgentState) -> dict:
 
 def route_preferences(state: AgentState) -> str:
     """偏好未补齐时结束本轮并提问，否则继续构建候选。"""
+    if state.get("force_recommendation"):
+        return "candidates"
     return "ask_preference" if state.get("next_preference_slot") else "candidates"
 
 
@@ -478,9 +492,10 @@ def build_candidates(state: AgentState) -> dict:
     candidates, step = timed_step(
         "search_anime_candidates",
         build_candidate_pool,
-        state.get("search_query") or state["query"],
+        state.get("safe_query") or state["query"],
         state["user_id"],
         RECOMMEND_CANDIDATE_LIMIT,
+        excluded_anime_ids=state.get("excluded_anime_ids", []),
     )
     candidates = candidates or []
     step["detail"] = f"selected {len(candidates)} candidates"
@@ -507,12 +522,25 @@ def retrieve_evidence(state: AgentState) -> dict:
             },
             "evidence_coverage": {
                 "modes": ["retrieval_error"],
-                "candidate_count": len(candidates),
+                "candidate_count": min(len(candidates), RECOMMEND_EVIDENCE_CANDIDATES),
                 "covered_candidates": 0,
                 "raw_evidence_count": 0,
                 "evidence_insufficient": True,
+                "eligible_candidate_ids": [],
+                "retrieval_coverage": {
+                    "covered_candidates": 0,
+                    "candidate_count": min(len(candidates), RECOMMEND_EVIDENCE_CANDIDATES),
+                },
+                "field_coverage": {
+                    "profile": False,
+                    "comments": False,
+                    "relations": False,
+                    "platform": False,
+                    "topic_or_sentiment": False,
+                },
                 "error": reason,
             },
+            "eligible_candidates": [],
             "fallback_reason": reason,
             "agent_steps": [
                 plain_step(
@@ -533,9 +561,21 @@ def retrieve_evidence(state: AgentState) -> dict:
         ),
         started,
     )
+    eligible_ids = diagnostics.get("eligible_candidate_ids")
+    if eligible_ids is None:
+        eligible_ids = [
+            int(candidate["id"])
+            for candidate in candidates
+            if evidence_map.get(int(candidate["id"]))
+        ][:RECOMMEND_EVIDENCE_CANDIDATES]
     return {
         "evidence_map": evidence_map,
         "evidence_coverage": diagnostics,
+        "eligible_candidates": [
+            candidate
+            for candidate in candidates
+            if int(candidate["id"]) in eligible_ids
+        ],
         "agent_steps": [step],
     }
 
@@ -552,13 +592,43 @@ def inspect_evidence(state: AgentState) -> dict:
         state.get("evidence_map", {})
     )
     coverage = dict(state.get("evidence_coverage", {}))
-    covered_candidates = sum(bool(items) for items in cleaned.values())
+    eligible_candidates = [
+        candidate
+        for candidate in state.get("candidates", [])
+        if cleaned.get(int(candidate["id"]))
+    ][:RECOMMEND_EVIDENCE_CANDIDATES]
+    eligible_ids = [int(candidate["id"]) for candidate in eligible_candidates]
+    candidate_fields = {
+        str(aid): evidence_field_coverage(cleaned.get(aid, []))
+        for aid in eligible_ids
+    }
+    fields = ("profile", "comments", "relations", "platform", "topic_or_sentiment")
+    field_counts = {
+        field: sum(bool(values.get(field)) for values in candidate_fields.values())
+        for field in fields
+    }
+    covered_candidates = len(eligible_candidates)
+    candidate_count = coverage.get("candidate_count", 0)
     coverage.update(
         {
             "covered_candidates": covered_candidates,
-            "evidence_insufficient": (
-                covered_candidates < coverage.get("candidate_count", 0)
-            ),
+            "eligible_candidate_count": covered_candidates,
+            "eligible_candidate_ids": eligible_ids,
+            "evidence_insufficient": covered_candidates < min(3, len(state.get("candidates", []))),
+            "retrieval_coverage": {
+                "covered_candidates": covered_candidates,
+                "candidate_count": candidate_count,
+            },
+            "field_coverage": {
+                field: bool(eligible_ids) and count == len(eligible_ids)
+                for field, count in field_counts.items()
+            },
+            "field_coverage_counts": field_counts,
+            "candidate_field_coverage": candidate_fields,
+            "evidence_gaps": {
+                aid: evidence_field_gaps(values)
+                for aid, values in candidate_fields.items()
+            },
             "security_flagged_count": security["flagged_count"],
             "security_filtered_count": security["filtered_count"],
         }
@@ -566,6 +636,7 @@ def inspect_evidence(state: AgentState) -> dict:
     return {
         "evidence_map": cleaned,
         "evidence_coverage": coverage,
+        "eligible_candidates": eligible_candidates,
         "evidence_security": security,
         "agent_steps": [
             plain_step(
@@ -586,8 +657,9 @@ def pack_context(state: AgentState) -> dict:
     """按预算打包候选证据，固定提示词版本并记录可追踪元数据。"""
     _, plain_step, render_prompt, _, _ = _recommend_helpers()
     packed, budget = pack_recommendation_context(
-        state.get("candidates", []),
+        _eligible_candidates(state),
         state.get("evidence_map", {}),
+        state.get("search_query") or state["query"],
     )
     prompt_template = get_prompt("recommendation")
     trace = prompt_trace(
@@ -665,7 +737,7 @@ def agent_decide(state: AgentState) -> dict:
                 state.get("evidence_map", {}).get(int(candidate["id"]), [])
             ),
         }
-        for candidate in state.get("candidates", [])
+        for candidate in _eligible_candidates(state)
     ]
     trace = state.get("prompt_trace", {})
     prompt_template = get_prompt(
@@ -751,15 +823,27 @@ def record_tool_round(state: AgentState) -> dict:
     }
 
 
-def tool_limit(state: AgentState) -> dict:
-    """把超过工具循环上限的执行转入可解释的本地降级。"""
-    _, plain_step, _, _, _ = _recommend_helpers()
-    reason = (
-        f"tool loop limit reached after {state.get('tool_rounds', 0)} rounds"
+def route_after_tool_round(state: AgentState) -> str:
+    """完成最大工具轮次后直接生成，避免再发起一次无意义规划。"""
+    return (
+        "tool_limit"
+        if state.get("tool_rounds", 0) >= RECOMMEND_TOOL_MAX_ROUNDS
+        else "agent_decide"
     )
+
+
+def tool_limit(state: AgentState) -> dict:
+    """停止继续调用工具，并使用已收集的证据进入结构化生成。"""
+    _, plain_step, _, _, _ = _recommend_helpers()
+    detail = (
+        f"tool loop limit reached after {state.get('tool_rounds', 0)} rounds"
+        "; continuing with collected evidence"
+    )
+    budget = dict(state.get("context_budget", {}))
+    budget["tool_limit_reached"] = True
     return {
-        "fallback_reason": reason,
-        "agent_steps": [plain_step("tool_loop_guard", "fallback", reason)],
+        "context_budget": budget,
+        "agent_steps": [plain_step("tool_loop_guard", "degraded", detail)],
     }
 
 
@@ -843,8 +927,9 @@ def validate(state: AgentState) -> dict:
     _, plain_step, _, _, validate_result = _recommend_helpers()
     data, errors = validate_result(
         dict(state.get("llm_data", {})),
-        state.get("candidates", []),
+        _eligible_candidates(state),
         state.get("evidence_map", {}),
+        required_count=3 if state.get("force_recommendation") else None,
     )
     if data.get("need_clarification"):
         errors.append("preference questionnaire is already complete")
@@ -954,8 +1039,8 @@ def finalize_success(state: AgentState) -> dict:
 
     all_evidence = [
         item
-        for values in state.get("evidence_map", {}).values()
-        for item in values
+        for candidate in _eligible_candidates(state)
+        for item in state.get("evidence_map", {}).get(int(candidate["id"]), [])
     ]
     steps = [*state.get("agent_steps", []), step]
     data.update(
@@ -984,7 +1069,7 @@ def finalize_success(state: AgentState) -> dict:
     )
     candidate_map = {
         int(candidate["id"]): candidate
-        for candidate in state.get("candidates", [])
+        for candidate in _eligible_candidates(state)
     }
     for recommendation in data.get("recommendations", []):
         candidate = candidate_map[int(recommendation["anime_id"])]
@@ -995,7 +1080,7 @@ def finalize_success(state: AgentState) -> dict:
         recommendation.update(
             {
                 "name": candidate.get("name", ""),
-                "platform": candidate.get("platform", ""),
+                "platform": verified_platform_availability(items),
                 "comment_count": candidate.get("comment_count", 0),
                 "evidence": {
                     "sentiment": candidate.get("sentiment", {}),
@@ -1026,7 +1111,7 @@ def fallback(state: AgentState) -> dict:
     steps = list(state.get("agent_steps", []))
     payload = local_result(
         state.get("search_query") or state["query"],
-        state.get("candidates", []),
+        _eligible_candidates(state),
         state.get("preferences", {}),
         state.get("evidence_map", {}),
         steps,
@@ -1034,6 +1119,7 @@ def fallback(state: AgentState) -> dict:
         reason,
         state.get("evidence_coverage", {}),
         state.get("context_budget", {}),
+        required_count=3 if state.get("force_recommendation") else None,
     )
     payload["result"]["preference_stage"] = ""
     payload["result"]["preference_progress"] = state.get(
@@ -1108,8 +1194,12 @@ def create_recommendation_graph(checkpointer=None):
         },
     )
     builder.add_edge("tools", "record_tool_round")
-    builder.add_edge("record_tool_round", "agent_decide")
-    builder.add_edge("tool_limit", "fallback")
+    builder.add_conditional_edges(
+        "record_tool_round",
+        route_after_tool_round,
+        {"agent_decide": "agent_decide", "tool_limit": "tool_limit"},
+    )
+    builder.add_edge("tool_limit", "generate")
     builder.add_conditional_edges(
         "generate",
         route_generation,
@@ -1218,6 +1308,8 @@ def run_recommendation_graph(
     history: list[dict] | None = None,
     *,
     task_id: int | None = None,
+    excluded_anime_ids: list[int] | None = None,
+    force_recommendation: bool = False,
     graph=None,
     auto_resume: bool = True,
 ) -> dict:
@@ -1235,6 +1327,8 @@ def run_recommendation_graph(
     initial_state = {
         "user_id": user_id,
         "query": query,
+        "excluded_anime_ids": list(excluded_anime_ids or []),
+        "force_recommendation": bool(force_recommendation),
         "history": history or [],
         "messages": [],
         "agent_steps": [],

@@ -11,8 +11,9 @@ from __future__ import annotations
 import json
 import logging
 import time
-from typing import Any
+from typing import Any, Callable
 
+from backend.agents.evidence_excerpt import select_evidence_excerpt
 from backend.agents.fallback import build_opinion_fallback
 from backend.agents.model_factory import get_chat_model
 from backend.agents.prompt_security import (
@@ -114,18 +115,49 @@ def _compact_comments(comments: dict[str, list[dict]], per_label: int = 2, text_
     return compact
 
 
-def _compact_evidence(evidence: list[dict], limit: int = 5, text_limit: int = 300) -> list[dict]:
+def _compact_evidence(
+    evidence: list[dict],
+    limit: int = 5,
+    text_limit: int = 300,
+    *,
+    query: str = "",
+    anime_name: str = "",
+    topics: list | None = None,
+    total_budget: int = 5000,
+) -> list[dict]:
     compact = []
-    for item in (evidence or [])[:limit]:
+    selected = (evidence or [])[:limit]
+    remaining = total_budget
+    pending = len(selected)
+    for item in selected:
+        allowance = min(
+            remaining,
+            max(text_limit, remaining // max(1, pending)),
+        )
+        full_content = str(
+            item.get("full_content") or item.get("content") or ""
+        )
+        excerpt = select_evidence_excerpt(
+            full_content,
+            query=query,
+            anime_name=anime_name,
+            topics=topics,
+            target_chars=allowance,
+            remaining_chars=remaining,
+        )
+        pending -= 1
+        if not excerpt:
+            continue
         compact.append({
             "doc_id": item.get("doc_id", ""),
             "source_type": item.get("source_type", ""),
-            "content": _truncate(item.get("content", ""), text_limit),
+            "evidence_excerpt": excerpt,
             "similarity": item.get("similarity", 0),
             "rank": item.get("rank", 0),
             "source_label": item.get("source_label", ""),
             "metadata": item.get("metadata", {}),
         })
+        remaining -= len(excerpt)
     return compact
 
 
@@ -139,9 +171,12 @@ def build_compact_opinion_context(
     word_limit: int = 20,
     comments_per_label: int = 2,
     comment_text_limit: int = 180,
-    evidence_limit: int = 5,
+    evidence_limit: int = 10,
     evidence_text_limit: int = 300,
+    evidence_budget: int = 5000,
     bangumi_summary_limit: int = 300,
+    query: str = "",
+    anime_name: str = "",
 ) -> tuple[dict[str, Any], list[dict]]:
     """压缩趋势、主题、评论和检索证据，控制发送给模型的上下文体积。"""
     bangumi = dict(context.get("bangumi") or {})
@@ -157,7 +192,15 @@ def build_compact_opinion_context(
         "aspect": context.get("aspect") or {},
         "bangumi": bangumi,
     }
-    return compact_context, _compact_evidence(evidence or [], evidence_limit, evidence_text_limit)
+    return compact_context, _compact_evidence(
+        evidence or [],
+        evidence_limit,
+        evidence_text_limit,
+        query=query,
+        anime_name=anime_name,
+        topics=context.get("topics") or [],
+        total_budget=evidence_budget,
+    )
 
 # ===== 模型输出解析与结构校验 =====
 
@@ -369,8 +412,23 @@ def _prefetch(anime_id: int | None = None, name: str | None = None) -> tuple[dic
     return anime, context, steps
 
 
-def analyze_public_opinion(anime_id: int | None = None, name: str | None = None, query: str = "") -> dict:
+def _emit_progress(callback: Callable[..., Any] | None, message: str, progress: int) -> None:
+    if callback is None:
+        return
+    try:
+        callback("phase", message=message, progress=progress)
+    except Exception:
+        logger.debug("Opinion stream callback failed", exc_info=True)
+
+
+def analyze_public_opinion(
+    anime_id: int | None = None,
+    name: str | None = None,
+    query: str = "",
+    event_callback: Callable[..., Any] | None = None,
+) -> dict:
     """运行完整舆情诊断，返回报告、执行轨迹及是否触发降级。"""
+    _emit_progress(event_callback, "正在准备动漫与评论数据", 10)
     anime, context, steps = _prefetch(anime_id=anime_id, name=name)
     if not anime:
         return {
@@ -381,6 +439,7 @@ def analyze_public_opinion(anime_id: int | None = None, name: str | None = None,
             "error": "未找到匹配的动漫",
         }
 
+    _emit_progress(event_callback, "正在清洗评论并构建分析上下文", 25)
     safe_comments, comment_security = sanitize_comment_groups(
         context.get("comments", {})
     )
@@ -390,10 +449,11 @@ def analyze_public_opinion(anime_id: int | None = None, name: str | None = None,
         source="user_input",
         max_chars=1200,
     )
+    _emit_progress(event_callback, "正在检索舆情证据", 40)
     retrieval = search_evidence(
         input_security["sanitized_text"] or anime["name"],
         anime_id=anime["id"],
-        top_k=6,
+        top_k=10,
     )
     raw_evidence = retrieval.get("evidence", [])
     cleaned_evidence, evidence_security = sanitize_evidence_map(
@@ -405,7 +465,7 @@ def analyze_public_opinion(anime_id: int | None = None, name: str | None = None,
     trace = prompt_trace(
         "opinion_report",
         LLM_MODEL,
-        retrieval.get("top_k", 6),
+        retrieval.get("top_k", 10),
         retrieval.get("fallback", True),
         prompt=prompt_template,
     )
@@ -424,6 +484,7 @@ def analyze_public_opinion(anime_id: int | None = None, name: str | None = None,
         "detail": f"{retrieval.get('mode')} returned {len(evidence)} evidence items",
         "elapsed_ms": 0,
     })
+    _emit_progress(event_callback, "正在生成结构化舆情报告", 60)
     model = get_chat_model(
         temperature=0.2,
         timeout=OPINION_LLM_TIMEOUT,
@@ -436,9 +497,15 @@ def analyze_public_opinion(anime_id: int | None = None, name: str | None = None,
         report.retrieval_evidence = _evidence_models(evidence)
         report.prompt_trace = PromptTrace(**trace)
         report.agent_steps = [AgentStep(**s) for s in steps] + report.agent_steps
+        _emit_progress(event_callback, "正在整理本地降级报告", 90)
         return {"anime": anime, "report": report.model_dump(), "agent_steps": [s.model_dump() for s in report.agent_steps], "fallback": True}
 
-    compact_context, compact_evidence = build_compact_opinion_context(context, evidence)
+    compact_context, compact_evidence = build_compact_opinion_context(
+        context,
+        evidence,
+        query=input_security["sanitized_text"],
+        anime_name=anime["name"],
+    )
     try:
         prompt = _render_opinion_prompt(
             query or "",
@@ -447,6 +514,7 @@ def analyze_public_opinion(anime_id: int | None = None, name: str | None = None,
             compact_evidence,
             prompt_template,
         )
+        _emit_progress(event_callback, "正在校验报告结构与证据引用", 75)
         report_data, success_step = _invoke_opinion_attempt(
             model,
             prompt,
@@ -464,6 +532,7 @@ def analyze_public_opinion(anime_id: int | None = None, name: str | None = None,
         report_data["retrieval_evidence"] = evidence
         report_data["prompt_trace"] = trace
         report_data["agent_steps"] = steps + report_data.get("agent_steps", [])
+        _emit_progress(event_callback, "舆情报告已通过校验", 95)
         return {"anime": anime, "report": report_data, "agent_steps": report_data["agent_steps"], "fallback": False}
     except Exception as first_exc:
         # 首次结构化结果失败后，只允许一次更小上下文的修复尝试。
@@ -475,6 +544,7 @@ def analyze_public_opinion(anime_id: int | None = None, name: str | None = None,
             "elapsed_ms": 0,
         })
 
+    _emit_progress(event_callback, "正在压缩上下文并修复报告", 82)
     retry_context, retry_evidence = build_compact_opinion_context(
         context,
         evidence,
@@ -486,7 +556,10 @@ def analyze_public_opinion(anime_id: int | None = None, name: str | None = None,
         comment_text_limit=140,
         evidence_limit=3,
         evidence_text_limit=220,
+        evidence_budget=1200,
         bangumi_summary_limit=160,
+        query=input_security["sanitized_text"],
+        anime_name=anime["name"],
     )
     retry_model = get_chat_model(
         temperature=0,
@@ -518,6 +591,7 @@ def analyze_public_opinion(anime_id: int | None = None, name: str | None = None,
         report_data["retrieval_evidence"] = evidence
         report_data["prompt_trace"] = trace
         report_data["agent_steps"] = steps + report_data.get("agent_steps", [])
+        _emit_progress(event_callback, "修复后的报告已通过校验", 95)
         return {"anime": anime, "report": report_data, "agent_steps": report_data["agent_steps"], "fallback": False}
     except Exception as exc:
         logger.warning("Opinion compact retry failed, using fallback: %s", exc)
@@ -527,6 +601,7 @@ def analyze_public_opinion(anime_id: int | None = None, name: str | None = None,
         report.retrieval_evidence = _evidence_models(evidence)
         report.prompt_trace = PromptTrace(**trace)
         report.agent_steps = [AgentStep(**s) for s in steps] + [error_step] + report.agent_steps
+        _emit_progress(event_callback, "正在整理本地降级报告", 90)
         return {"anime": anime, "report": report.model_dump(), "agent_steps": [s.model_dump() for s in report.agent_steps], "fallback": True}
 
 

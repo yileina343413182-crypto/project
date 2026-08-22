@@ -36,7 +36,7 @@ class PromptRegistryTest(unittest.TestCase):
             prompt.version,
             active_versions["recommendation"],
         )
-        self.assertEqual(prompt.version, "rag-v6-bounded-reasons")
+        self.assertEqual(prompt.version, "rag-v8-soft-reason-length")
         self.assertEqual(len(prompt.template_hash), 64)
 
     def test_historical_prompt_version_remains_addressable(self):
@@ -63,6 +63,7 @@ class PromptRegistryTest(unittest.TestCase):
         expected = {
             "opinion_report",
             "recommendation",
+            "recommendation_chat",
             "recommendation_followup",
             "watch_guide",
             "evidence_answering",

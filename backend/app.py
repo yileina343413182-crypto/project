@@ -38,6 +38,7 @@ from backend.api.topic import router as topic_router
 from backend.database import init_user_tables
 from backend.agents.memory import init_agent_tables
 from backend.agents.recommend_graph import close_recommendation_checkpointer
+from backend.agents.stream_events import close_agent_stream_client
 from backend.rag.storage import init_rag_tables
 from backend.config import CORS_ORIGINS, DEBUG, HOST, PORT
 from backend.db.session import dispose_async_engines, dispose_sync_engines
@@ -63,6 +64,7 @@ async def _lifespan(_app: FastAPI):
     yield
     # 关闭阶段主动释放连接，避免开发期热重载遗留数据库连接。
     close_recommendation_checkpointer()
+    await close_agent_stream_client()
     await dispose_async_engines()
     dispose_sync_engines()
 

@@ -27,7 +27,7 @@ from backend.rag.async_storage import (
     list_index_jobs,
 )
 from backend.rag.storage import update_index_job
-from backend.rag.vector_store import chroma_available
+from backend.rag.vector_store import ChromaVectorStore, chroma_available
 from backend.db.session import get_async_session
 from backend.security import get_current_user_id
 
@@ -101,6 +101,14 @@ async def index_status(
     active = await get_active_collection(db)
     metadata = await get_collection_metadata(db, active)
     embedding = embedding_status()
+    vector_index = (
+        await run_in_threadpool(
+            ChromaVectorStore().persisted_index_status,
+            active,
+        )
+        if active
+        else ChromaVectorStore().persisted_index_status(None)
+    )
     return ok({
         "active_collection": active,
         "document_count": await count_documents(db, active) if active else 0,
@@ -113,6 +121,8 @@ async def index_status(
         "model_matches_active_index": bool(metadata and metadata.get("embedding_provider") == embedding.get("provider") and metadata.get("embedding_model") == embedding.get("model")),
         "active_collection_metadata": metadata,
         "chroma_available": chroma_available(),
+        "vector_index": vector_index,
+        "vector_index_ready": bool(vector_index.get("index_files_complete")),
     })
 
 

@@ -7,6 +7,11 @@
 
 from __future__ import annotations
 
+from backend.agents.recommend_context import (
+    evidence_field_coverage,
+    evidence_field_gaps,
+    verified_platform_availability,
+)
 from backend.agents.schemas import (
     AgentStep,
     AnimeRecommendation,
@@ -55,8 +60,40 @@ def _preference_line(preferences: dict) -> str:
     return _limited_text("；".join(parts), 40) or "当前没有可安全引用的结构化偏好"
 
 
-def _fallback_recommendation_reason(item: dict, preferences: dict) -> str:
+def _fallback_evidence_line(evidence_items: list[dict]) -> tuple[str, set[str]]:
+    """只汇总已清洗证据的数量和类型，不把不可信正文拼入固定模板。"""
+    source_types = {
+        str(item.get("source_type") or (item.get("metadata") or {}).get("source_type") or "").strip()
+        for item in evidence_items
+        if isinstance(item, dict)
+    }
+    source_types.discard("")
+    labels = {
+        "comment": "评论",
+        "topic": "主题",
+        "sentiment_summary": "情感统计",
+        "anime_profile": "作品资料",
+        "anime_knowledge": "作品知识",
+        "anime_relation": "作品关系",
+        "relation": "作品关系",
+        "platform_availability": "播放平台",
+    }
+    if not evidence_items:
+        return "检索证据：当前未关联到可引用的RAG条目", source_types
+    readable = [labels.get(source_type, source_type) for source_type in sorted(source_types)]
+    type_text = "、".join(readable) if readable else "未分类"
+    return f"检索证据：已关联{len(evidence_items)}条，类型包括{type_text}", source_types
+
+
+def _fallback_recommendation_reason(
+    item: dict,
+    preferences: dict,
+    evidence_items: list[dict] | None = None,
+) -> str:
     """仅依据候选元数据生成满足长度契约的本地推荐说明。"""
+    evidence_line, source_types = _fallback_evidence_line(evidence_items or [])
+    field_coverage = evidence_field_coverage(evidence_items or [])
+    field_gaps = evidence_field_gaps(field_coverage)
     name = _limited_text(item.get("name") or "这部作品", 30)
     topics = [
         _limited_text(topic, 16)
@@ -88,11 +125,27 @@ def _fallback_recommendation_reason(item: dict, preferences: dict) -> str:
         score_text = f"{score:.3f}"
     except (TypeError, ValueError):
         score_text = "未提供"
-    platform = _limited_text(item.get("platform"), 24)
+    platform = _limited_text(verified_platform_availability(evidence_items or []), 24)
     platform_line = (
-        f"本地资料记录为{platform}，实际版权与地区可用性请在播放前核对"
+        f"现有可追溯资料记录的观看平台为{platform}，实际版权与地区可用性仍应在播放前核对"
         if platform
-        else "本地资料未记录明确平台，请通过正规版权渠道查询"
+        else "播放平台证据不足；Bangumi/Bilibili 采集来源不作为观看平台，请通过正规版权渠道查询"
+    )
+    has_relation = bool(source_types & {"anime_relation", "relation"})
+    relation_line = (
+        "现有证据包含作品关系记录，可据此进一步核对同系列或关联作品"
+        if has_relation
+        else "现有证据未提供可靠作品关系映射，因此不编造相近片名"
+    )
+    field_gap_line = (
+        f"字段覆盖提示：{'、'.join(field_gaps)}"
+        if field_gaps
+        else "字段覆盖提示：简介、评论、作品关系和播放平台均有对应证据"
+    )
+    evidence_scope_line = (
+        "这些条目可支持对应评论、主题或统计判断，但不自动证明未收录的剧情设定"
+        if evidence_items
+        else "因此本次只能依据候选元数据和结构化统计做保守排序"
     )
 
     reason = (
@@ -101,13 +154,13 @@ def _fallback_recommendation_reason(item: dict, preferences: dict) -> str:
         f"偏好匹配：{_preference_line(preferences)}；{topic_line}。"
         "它们仅用于限定筛选方向，不代表对剧情的额外推断。"
         f"口碑依据：{sentiment_line}。统计只反映当前收录样本，不能替代完整观众评价。"
+        f"{evidence_line}；{evidence_scope_line}。{field_gap_line}。"
         "核心看点：可先观察上述主题、角色推进与整体节奏是否符合预期；"
         "降级模式不会补写数据库没有的设定。"
         "适合观看场景：建议先试看一至两集，再按实际节奏和情绪体验决定是否继续。"
-        "相近作品类比：当前没有可靠映射，因此不编造片名。"
+        f"相近作品类比：{relation_line}。"
         f"观看平台建议：{platform_line}。"
-        "劝退点：本次结论主要依据有限评论和结构化统计；若在意画风、结局、CP关系或"
-        "特定雷点，现有证据无法保证，开看前应核对作品简介和近期评论。"
+        "劝退点：若在意画风、结局、CP关系或特定雷点，应针对这些字段核对作品简介和近期评论。"
     ).strip()
     if len(reason) > RECOMMEND_REASON_MAX_CHARS:
         prefix = reason[:RECOMMEND_REASON_MAX_CHARS]
@@ -158,21 +211,31 @@ def build_opinion_fallback(anime: dict, stats: dict, topics: list, comments: dic
     )
 
 
-def build_recommendation_fallback(query: str, candidates: list, preferences: dict) -> RecommendationResponseSchema:
+def build_recommendation_fallback(
+    query: str,
+    candidates: list,
+    preferences: dict,
+    evidence_map: dict[int, list[dict]] | None = None,
+    required_count: int | None = None,
+) -> RecommendationResponseSchema:
     """按预计算候选分数生成最多三条本地推荐。"""
-    normalized = "".join(query.strip().lower().split()).strip("，。！？!? ")
-    if normalized in {"", "推荐", "推荐一下", "推荐动漫", "想看动漫", "有没有推荐", "随便推荐", "不知道看什么"}:
+    evidence_map = evidence_map or {}
+    minimum = required_count or 1
+    if len(candidates) < minimum:
         return RecommendationResponseSchema(
             need_clarification=True,
-            clarifying_question="想看轻松治愈、剧情强冲突，还是口碑稳定的经典作品？",
+            clarifying_question=(
+                f"当前符合条件且未看过、未重复推荐的作品不足{minimum}部，"
+                "请放宽题材或其他筛选条件。"
+            ),
             recommendations=[],
             preference_updates={},
-            agent_steps=[AgentStep(name="fallback_clarify", status="fallback", detail="输入偏好不足，先追问")],
+            agent_steps=[AgentStep(name="fallback_insufficient_candidates", status="fallback", detail=f"不足{minimum}个 eligible 候选")],
             fallback=True,
         )
 
     recs = []
-    for item in candidates[:3]:
+    for item in candidates[: required_count or 3]:
         evidence = RecommendationEvidence(
             sentiment=item.get("sentiment", {}),
             topics=item.get("topics", []),
@@ -181,9 +244,15 @@ def build_recommendation_fallback(query: str, candidates: list, preferences: dic
         recs.append(AnimeRecommendation(
             anime_id=item.get("id"),
             name=item.get("name", ""),
-            platform=item.get("platform", ""),
+            platform=verified_platform_availability(
+                evidence_map.get(int(item.get("id")), [])
+            ),
             comment_count=item.get("comment_count", 0),
-            reason=_fallback_recommendation_reason(item, preferences),
+            reason=_fallback_recommendation_reason(
+                item,
+                preferences,
+                evidence_map.get(int(item.get("id")), []),
+            ),
             match_tags=item.get("match_tags", ["本地匹配", "评论证据"]),
             evidence=evidence,
         ))

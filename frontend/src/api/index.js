@@ -119,16 +119,116 @@ export function analyzeOpinionAgent(payload, clientRequestId = createAgentReques
   return api.post('/agent/opinion/analyze', { ...payload, client_request_id: clientRequestId })
 }
 
-export function startRecommendationAgent(query, clientRequestId = createAgentRequestId()) {
-  return api.post('/agent/recommend/start', { query, client_request_id: clientRequestId })
+export function startRecommendationAgent(query, clientRequestId = createAgentRequestId(), attachmentId = null) {
+  return api.post('/agent/recommend/start', {
+    query,
+    client_request_id: clientRequestId,
+    attachment_id: attachmentId
+  })
 }
 
-export function sendRecommendationAgentMessage(session_id, message, clientRequestId = createAgentRequestId()) {
-  return api.post('/agent/recommend/message', { session_id, message, client_request_id: clientRequestId })
+export function sendRecommendationAgentMessage(session_id, message, clientRequestId = createAgentRequestId(), attachmentId = null) {
+  return api.post('/agent/recommend/message', {
+    session_id,
+    message,
+    client_request_id: clientRequestId,
+    attachment_id: attachmentId
+  })
+}
+
+async function authenticatedFetch(path, options = {}) {
+  const headers = new Headers(options.headers || {})
+  const token = getToken()
+  if (token) headers.set('Authorization', `Bearer ${token}`)
+  const response = await fetch(path, { ...options, headers })
+  if (response.status === 401) {
+    removeToken()
+    window.location.href = '/login'
+    throw new Error('登录状态已失效')
+  }
+  return response
+}
+
+export async function uploadRecommendationImage(file) {
+  const response = await authenticatedFetch('/api/agent/attachments/images', {
+    method: 'POST',
+    headers: { 'Content-Type': file.type },
+    body: file
+  })
+  const payload = await response.json()
+  if (!response.ok || payload.code !== 200) throw new Error(payload.msg || '图片上传失败')
+  return payload.data
+}
+
+export async function getAgentAttachmentBlob(attachmentId, signal) {
+  const response = await authenticatedFetch(`/api/agent/attachments/${attachmentId}/content`, { signal })
+  if (!response.ok) {
+    let message = '图片加载失败'
+    try {
+      const payload = await response.json()
+      message = payload.msg || message
+    } catch {
+      // 二进制接口的非JSON错误保留通用提示。
+    }
+    throw new Error(message)
+  }
+  return response.blob()
+}
+
+export function deleteUnboundAgentAttachment(attachmentId) {
+  return api.delete(`/agent/attachments/${attachmentId}`)
 }
 
 export function getAgentTask(taskId) {
   return api.get('/agent/tasks/' + taskId)
+}
+
+export async function streamAgentTask(taskId, { signal, after = '0-0', onEvent } = {}) {
+  const headers = { Accept: 'application/x-ndjson' }
+  const token = getToken()
+  if (token) headers.Authorization = `Bearer ${token}`
+  const response = await fetch(
+    `/api/agent/tasks/${taskId}/events?after=${encodeURIComponent(after)}`,
+    { headers, signal }
+  )
+  if (response.status === 401) {
+    removeToken()
+    window.location.href = '/login'
+    throw new Error('登录状态已失效')
+  }
+  if (!response.ok || !response.body) {
+    let message = '流式连接失败'
+    try {
+      const payload = await response.json()
+      message = payload.msg || payload.message || message
+    } catch {
+      // 非JSON错误响应保留通用提示，任务轮询仍会继续。
+    }
+    throw new Error(message)
+  }
+
+  const reader = response.body.pipeThrough(new TextDecoderStream()).getReader()
+  let buffer = ''
+  let lastEventId = after
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += value
+    const lines = buffer.split('\n')
+    buffer = lines.pop() || ''
+    for (const line of lines) {
+      if (!line.trim()) continue
+      let event
+      try {
+        event = JSON.parse(line)
+      } catch {
+        continue
+      }
+      if (event.event_id) lastEventId = event.event_id
+      if (typeof onEvent === 'function') onEvent(event)
+    }
+  }
+  return { lastEventId }
 }
 
 export function getAgentSessions() {
@@ -153,6 +253,14 @@ export function getWatchGuide(guideId) {
 
 export function deleteWatchGuide(guideId) {
   return api.delete(`/agent/watch-guides/${guideId}`)
+}
+
+export function getAnimeLibrary() {
+  return api.get('/agent/anime-library')
+}
+
+export function updateAnimeLibraryStatus(animeId, status) {
+  return api.put(`/agent/anime-library/${animeId}`, { status })
 }
 
 // ===== RAG / PromptOps API =====

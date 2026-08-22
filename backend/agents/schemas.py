@@ -106,7 +106,7 @@ class LLMOpinionReportSchema(BaseModel):
 RECOMMEND_REASON_MIN_CHARS = 300
 RECOMMEND_REASON_MAX_CHARS = 500
 RECOMMEND_REASON_DESCRIPTION = (
-    "Recommendation reason with 300 to 500 Unicode characters after trimming"
+    "Complete recommendation reason; 300 to 500 Unicode characters is preferred but not required"
 )
 
 class RecommendationEvidence(BaseModel):
@@ -139,8 +139,22 @@ class LLMRecommendationResponse(BaseModel):
     """Bounded output requested from the LLM only."""
     need_clarification: bool = False
     clarifying_question: str = ""
-    recommendations: list[LLMAnimeRecommendation] = Field(default_factory=list)
+    recommendations: list[LLMAnimeRecommendation] = Field(
+        default_factory=list,
+        description="Exactly three unique recommendations unless clarification is required",
+    )
     preference_updates: dict[str, list[Any]] = Field(default_factory=dict)
+
+
+class RecommendationTurnDecision(BaseModel):
+    """Bounded action selected before any recommendation retrieval is allowed."""
+
+    action: str = Field(
+        default="chat",
+        description="chat, recommendation, followup, or preference_answer",
+    )
+    reason: str = ""
+    matched_signals: list[str] = Field(default_factory=list)
 
 
 class RecommendationResponseSchema(BaseModel):

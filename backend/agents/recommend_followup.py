@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any
+from typing import Any, Callable
 
 from backend.agents.model_factory import get_chat_model
 from backend.agents.prompt_security import inspect_untrusted_text
@@ -90,6 +90,29 @@ def extract_last_recommendation_context(messages: list[dict] | None) -> dict | N
     return None
 
 
+def extract_recommended_anime_ids(messages: list[dict] | None) -> list[int]:
+    """提取会话全部成功推荐 ID，用于后续批次的候选硬排除。"""
+    anime_ids: list[int] = []
+    seen: set[int] = set()
+    for message in messages or []:
+        if not isinstance(message, dict) or message.get("role") not in {"agent", "assistant"}:
+            continue
+        result = _recommendation_result(message)
+        if result.get("need_clarification"):
+            continue
+        for item in result.get("recommendations") or []:
+            if not isinstance(item, dict):
+                continue
+            try:
+                anime_id = int(item.get("anime_id"))
+            except (TypeError, ValueError):
+                continue
+            if anime_id > 0 and anime_id not in seen:
+                seen.add(anime_id)
+                anime_ids.append(anime_id)
+    return anime_ids
+
+
 def _response_text(response: Any) -> str:
     content = getattr(response, "content", response)
     if isinstance(content, list):
@@ -150,6 +173,7 @@ def run_recommendation_followup(
     query: str,
     history: list[dict] | None,
     recommendation_context: dict,
+    on_text_delta: Callable[[str], Any] | None = None,
 ) -> dict:
     """基于最近推荐与对话历史生成详细普通文本，不返回推荐 Schema。"""
     prompt_template = get_prompt("recommendation_followup")
@@ -207,14 +231,23 @@ def run_recommendation_followup(
         recommendations=recommendation_check["sanitized_text"],
     )
     try:
-        answer = _response_text(
-            model.invoke(
-                [
-                    ("system", prompt_template.render_system()),
-                    ("human", prompt),
-                ]
-            )
-        )
+        messages = [
+            ("system", prompt_template.render_system()),
+            ("human", prompt),
+        ]
+        if on_text_delta is None or not hasattr(model, "stream"):
+            answer = _response_text(model.invoke(messages))
+            if answer and on_text_delta is not None:
+                on_text_delta(answer)
+        else:
+            parts = []
+            for chunk in model.stream(messages):
+                delta = _response_text(chunk)
+                if not delta:
+                    continue
+                parts.append(delta)
+                on_text_delta(delta)
+            answer = "".join(parts).strip()
         if not answer:
             raise ValueError("LLM returned an empty follow-up answer")
         return {

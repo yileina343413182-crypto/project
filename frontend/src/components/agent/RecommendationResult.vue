@@ -21,25 +21,29 @@
           </div>
         </dl>
 
-        <footer v-if="item.match_tags?.length || item.platform" class="rec-footer">
+        <footer v-if="item.match_tags?.length || item.evidenceActions.length || item.platform" class="rec-footer">
           <div v-if="item.match_tags?.length" class="tags">
             <span class="section-label">匹配标签</span>
             <div class="tag-list">
-              <template v-for="tag in item.match_tags" :key="tag">
-                <button
-                  v-if="evidenceTagType(tag)"
-                  type="button"
-                  class="tag-button"
-                  :class="{ active: isPanelOpen(item.uiKey, evidenceTagType(tag)) }"
-                  :id="evidenceTriggerId(item.uiKey, evidenceTagType(tag))"
-                  :aria-expanded="isPanelOpen(item.uiKey, evidenceTagType(tag))"
-                  :aria-controls="item.panelId"
-                  :aria-label="`${isPanelOpen(item.uiKey, evidenceTagType(tag)) ? '收起' : '查看'}${item.name}的${tag}`"
-                  @click="toggleEvidencePanel(item.uiKey, evidenceTagType(tag))"
-                >{{ tag }}<span aria-hidden="true">{{ isPanelOpen(item.uiKey, evidenceTagType(tag)) ? '−' : '＋' }}</span></button>
-                <span v-else class="tag-label">{{ tag }}</span>
-              </template>
+              <span v-for="tag in item.match_tags" :key="tag" class="tag-label">{{ tag }}</span>
             </div>
+          </div>
+          <div v-if="item.evidenceActions.length" class="evidence-actions" aria-label="推荐依据">
+            <button
+              v-for="action in item.evidenceActions"
+              :key="action.type"
+              type="button"
+              class="tag-button evidence-action"
+              :class="{ active: isPanelOpen(item.uiKey, action.type) }"
+              :id="evidenceTriggerId(item.uiKey, action.type)"
+              :aria-expanded="isPanelOpen(item.uiKey, action.type)"
+              :aria-controls="item.panelId"
+              :aria-label="`${isPanelOpen(item.uiKey, action.type) ? '收起' : '查看'}${item.name}的${action.label}`"
+              @click="toggleEvidencePanel(item.uiKey, action.type)"
+            >
+              <span>{{ action.label }}</span>
+              <b aria-hidden="true">{{ isPanelOpen(item.uiKey, action.type) ? '−' : '＋' }}</b>
+            </button>
           </div>
           <span v-if="item.platform" class="platform">{{ item.platform }}</span>
         </footer>
@@ -232,11 +236,27 @@ function splitReason(reason) {
   return { summary, details }
 }
 
+function normalizedTagText(tag) {
+  return String(tag || '')
+    .replace(/[\u200B-\u200D\uFEFF]/gu, '')
+    .trim()
+    .replace(/^[\[\]【】()（）<>《》]+/u, '')
+    .trim()
+}
+
 function evidenceTagType(tag) {
-  const value = String(tag || '').trim()
-  if (value === '口碑') return 'reputation'
-  if (value === '评论证据') return 'comments'
+  const value = normalizedTagText(tag)
+    .replace(/\s+/gu, '')
+    .replace(/[＋+−-]+$/u, '')
+  if (/^口碑(?:依据)?$/u.test(value)) return 'reputation'
+  if (/^评论(?:检索)?证据$/u.test(value)) return 'comments'
   return ''
+}
+
+function displayMatchTag(tag) {
+  return normalizedTagText(tag)
+    .replace(/^匹配\s*[：:]\s*/u, '')
+    .trim()
 }
 
 function isPanelOpen(itemKey, panel) {
@@ -520,20 +540,28 @@ function formatItem(item, index) {
   const uiKey = `${item?.anime_id ?? 'unknown'}-${index}`
   const context = evidenceContext(item)
   const reputation = reputationContext(item, context.allEvidence, uiKey)
+  const rawTags = (Array.isArray(item?.match_tags) ? item.match_tags : [])
+    .map((tag) => String(tag || ''))
   const matchTags = [...new Set(
-    (Array.isArray(item?.match_tags) ? item.match_tags : [])
-      .map((tag) => String(tag || '').trim())
+    rawTags
+      .filter((tag) => !evidenceTagType(tag))
+      .map(displayMatchTag)
       .filter(Boolean)
   )]
-  if (reputation.hasContent && !matchTags.includes('口碑')) matchTags.push('口碑')
-  if (
-    (context.commentEvidence.length || context.missingEvidenceRefs.length) &&
-    !matchTags.includes('评论证据')
-  ) matchTags.push('评论证据')
+  const evidenceTypes = new Set(rawTags.map(evidenceTagType).filter(Boolean))
+  if (reputation.hasContent) evidenceTypes.add('reputation')
+  if (context.commentEvidence.length || context.missingEvidenceRefs.length) {
+    evidenceTypes.add('comments')
+  }
+  const evidenceActions = [
+    { type: 'reputation', label: '口碑依据' },
+    { type: 'comments', label: '评论证据' }
+  ].filter((action) => evidenceTypes.has(action.type))
 
   return {
     ...item,
     match_tags: matchTags,
+    evidenceActions,
     uiKey,
     panelId: `recommendation-evidence-${uiKey}`,
     recommendationIndex: indexText
@@ -611,7 +639,7 @@ function formatItem(item, index) {
 }
 .reason-detail dt { color: var(--neon-cyan); font-size: 12px; font-weight: 600; line-height: 1.65; }
 .reason-detail dd { min-width: 0; margin: 0; color: var(--text-secondary); font-size: 13px; line-height: 1.65; overflow-wrap: anywhere; }
-.rec-footer { display: flex; align-items: center; gap: 12px; margin-top: 15px; padding-top: 13px; border-top: 1px solid rgba(255, 255, 255, 0.06); }
+.rec-footer { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; margin-top: 15px; padding-top: 13px; border-top: 1px solid rgba(255, 255, 255, 0.06); }
 .tags { min-width: 0; display: flex; align-items: center; gap: 12px; }
 .tags > .section-label { flex-shrink: 0; }
 .tag-list { display: flex; flex-wrap: wrap; gap: 7px; }
@@ -629,11 +657,29 @@ function formatItem(item, index) {
 .tag-button {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 7px;
   cursor: pointer;
   transition: border-color 0.18s ease, background 0.18s ease, box-shadow 0.18s ease;
 }
-.tag-button span { padding: 0; border: 0; background: transparent; font-size: 13px; line-height: 1; }
+.evidence-actions { display: flex; flex-wrap: wrap; gap: 7px; margin-left: auto; }
+.evidence-action {
+  min-height: 27px;
+  padding: 3px 7px 3px 10px;
+  border-radius: 999px;
+  background: rgba(0, 229, 255, 0.035);
+}
+.evidence-action > span { font-size: 10px; line-height: 1.45; }
+.evidence-action > b {
+  display: inline-grid;
+  width: 17px;
+  height: 17px;
+  place-items: center;
+  border-radius: 50%;
+  background: rgba(0, 229, 255, 0.1);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+}
 .tag-button:hover,
 .tag-button.active {
   border-color: rgba(0, 229, 255, 0.5);
@@ -811,6 +857,7 @@ function formatItem(item, index) {
   .reason-detail { grid-template-columns: 1fr; gap: 3px; }
   .rec-footer { align-items: flex-start; flex-wrap: wrap; }
   .tags { align-items: flex-start; flex-direction: column; gap: 8px; }
+  .evidence-actions { width: 100%; margin-left: 0; }
   .platform { margin-left: auto; }
   .evidence-panel { margin-top: 12px; padding: 12px; }
   .sentiment-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }

@@ -40,6 +40,7 @@ os.environ["RECOMMEND_CHECKPOINT_DB"] = _checkpoint_file.name
 os.environ["RECOMMEND_CHECKPOINT_BACKEND"] = "sqlite"
 os.environ["CELERY_BROKER_URL"] = "memory://"
 os.environ["CELERY_RESULT_BACKEND"] = "cache+memory://"
+os.environ["AGENT_STREAM_ENABLED"] = "false"
 for _name in (
     "LLM_API_KEY",
     "EMBEDDING_API_KEY",
@@ -65,6 +66,7 @@ _config.RECOMMEND_CHECKPOINT_DB = _checkpoint_file.name
 _config.RECOMMEND_CHECKPOINT_BACKEND = "sqlite"
 _config.CELERY_BROKER_URL = "memory://"
 _config.CELERY_RESULT_BACKEND = "cache+memory://"
+_config.AGENT_STREAM_ENABLED = False
 _config.RERANK_API_KEY = ""
 _db_session.DATABASE_URL = _sync_url
 _db_session.ASYNC_DATABASE_URL = _async_url

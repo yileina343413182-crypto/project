@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import time
 import math
+import re
 from difflib import SequenceMatcher
 from typing import Annotated, Any
 
@@ -25,11 +26,17 @@ from backend.database import (
     get_wordcloud_data,
 )
 from backend.database import orm_session
-from backend.db.models import Comment
+from backend.db.models import Comment, RagDocument, Topic
 from backend.services.bangumi import search_anime
-from backend.agents.memory import get_user_preferences as load_preferences, update_user_preferences as save_preferences
+from backend.agents.memory import (
+    get_non_recommendable_anime_ids,
+    get_user_preferences as load_preferences,
+    update_user_preferences as save_preferences,
+)
 from backend.agents.prompt_security import sanitize_search_result
+from backend.agents.recommend_context import verified_platform_availability
 from backend.rag.retriever import search_evidence
+from backend.rag.storage import get_active_collection, query_terms
 
 try:
     from langchain_core.tools import tool
@@ -143,33 +150,266 @@ def _get_sentiment_stats_map() -> dict[int, dict[str, int]]:
     return stats_map
 
 
-def build_candidate_pool(query: str, user_id: int | None = None, limit: int = 8) -> list[dict]:
-    """综合名称匹配、情感、热度与用户负偏好生成有界候选池。"""
-    keyword = query.strip().lower()
+_CANDIDATE_LOW_INFO_TERMS = {
+    "推荐", "动漫", "动画", "番剧", "一部", "一些", "想看", "有没有",
+    "什么", "比较", "最好", "希望", "喜欢", "不要", "避开", "关于",
+    "主题", "旗下", "制作", "制作公司", "出品",
+}
+
+_COMPANY_ALIASES = {
+    "京阿尼": "京都アニメーション",
+    "京都动画": "京都アニメーション",
+    "京都動畫": "京都アニメーション",
+    "kyoani": "京都アニメーション",
+}
+_COMPANY_CONSTRAINT_OPT_OUTS = (
+    "不限制作公司", "不限定制作公司", "制作公司不限", "不一定要该制作公司",
+    "其他公司也可以", "不必是该公司",
+)
+
+
+def _normalize_match_text(value: object) -> str:
+    """统一标题和关键词的匹配形式，忽略空白及常见分隔符。"""
+    return re.sub(r"[^\w\u4e00-\u9fff]+", "", str(value or "").lower())
+
+
+def _intent_terms(value: object) -> list[str]:
+    """提取用于候选匹配的有效词项，并过滤推荐请求中的低信息词。"""
+    result = []
+    for term in query_terms(str(value or "")):
+        normalized = _normalize_match_text(term)
+        if (
+            len(normalized) > 1
+            and normalized not in _CANDIDATE_LOW_INFO_TERMS
+            and normalized not in result
+        ):
+            result.append(normalized)
+    return result
+
+
+def _topic_terms(value: object) -> list[str]:
+    """兼容 Topic.keywords 的字典列表、字符串列表和异常旧数据。"""
+    if not isinstance(value, list):
+        value = [value]
+    result = []
+    for item in value:
+        word = item.get("word", "") if isinstance(item, dict) else item
+        normalized = _normalize_match_text(word)
+        if normalized and normalized not in result:
+            result.append(normalized)
+    return result
+
+
+def _get_topic_terms_map() -> dict[int, list[str]]:
+    """一次读取全部主题词，避免为候选语义评分产生 N+1 查询。"""
+    with orm_session() as session:
+        rows = session.execute(select(Topic.anime_id, Topic.keywords)).all()
+
+    terms_map: dict[int, list[str]] = {}
+    for anime_id, keywords in rows:
+        terms = terms_map.setdefault(int(anime_id), [])
+        for term in _topic_terms(keywords):
+            if term not in terms:
+                terms.append(term)
+    return terms_map
+
+
+def _split_knowledge_values(value: str) -> list[str]:
+    return [part.strip() for part in re.split(r"[、,，;/；]", value) if part.strip()]
+
+
+def _parse_structured_knowledge(content: str) -> dict[str, Any]:
+    """从已索引的知识文档提取候选排序需要的稳定结构化字段。"""
+    result: dict[str, Any] = {
+        "summary": "",
+        "genres": [],
+        "moods": [],
+        "production_companies": [],
+        "year": "",
+        "work_type": "",
+    }
+    for line in str(content or "").splitlines():
+        text = line.strip()
+        if not text:
+            continue
+        if "无剧透简介：" in text and not result["summary"]:
+            result["summary"] = text.split("无剧透简介：", 1)[1].strip()
+        elif text.startswith("题材标签："):
+            result["genres"] = _split_knowledge_values(text.split("：", 1)[1])
+        elif text.startswith("氛围标签："):
+            result["moods"] = _split_knowledge_values(text.split("：", 1)[1])
+        elif text.startswith("制作公司："):
+            result["production_companies"] = _split_knowledge_values(text.split("：", 1)[1])
+        elif text.startswith("年代："):
+            result["year"] = text.split("：", 1)[1].strip()
+        elif text.startswith("作品类型："):
+            result["work_type"] = text.split("：", 1)[1].strip()
+    return result
+
+
+def _get_structured_knowledge_map() -> dict[int, dict[str, Any]]:
+    """一次读取活动集合中的作品知识，避免候选循环产生 N+1 查询。"""
+    collection_name = get_active_collection()
+    if not collection_name:
+        return {}
+    with orm_session() as session:
+        rows = session.execute(
+            select(RagDocument.anime_id, RagDocument.content).where(
+                RagDocument.collection_name == collection_name,
+                RagDocument.source_type == "anime_knowledge",
+                RagDocument.anime_id.is_not(None),
+            )
+        ).all()
+    return {
+        int(anime_id): _parse_structured_knowledge(content)
+        for anime_id, content in rows
+    }
+
+
+def _company_search_fields(companies: list[str]) -> list[str]:
+    fields = [_normalize_match_text(company) for company in companies]
+    normalized_companies = set(fields)
+    for alias, canonical in _COMPANY_ALIASES.items():
+        if _normalize_match_text(canonical) in normalized_companies:
+            fields.append(_normalize_match_text(alias))
+    return list(dict.fromkeys(field for field in fields if field))
+
+
+def _requested_production_companies(
+    query: str,
+    knowledge_map: dict[int, dict[str, Any]],
+) -> set[str]:
+    """识别用户明确写出的制作公司；命中后作为候选硬约束。"""
+    normalized_query = _normalize_match_text(query)
+    if any(_normalize_match_text(value) in normalized_query for value in _COMPANY_CONSTRAINT_OPT_OUTS):
+        return set()
+    requested = {
+        _normalize_match_text(canonical)
+        for alias, canonical in _COMPANY_ALIASES.items()
+        if _normalize_match_text(alias) in normalized_query
+    }
+    for knowledge in knowledge_map.values():
+        for company in knowledge.get("production_companies", []):
+            normalized_company = _normalize_match_text(company)
+            if normalized_company and normalized_company in normalized_query:
+                requested.add(normalized_company)
+    return requested
+
+
+def _matches_term(term: str, searchable_fields: list[str]) -> bool:
+    return any(term in field for field in searchable_fields if field)
+
+
+def build_candidate_pool(
+    query: str,
+    user_id: int | None = None,
+    limit: int = 8,
+    excluded_anime_ids: list[int] | set[int] | None = None,
+) -> list[dict]:
+    """综合本轮意图、结构化知识、低权重长期偏好、口碑与热度生成候选。"""
+    keyword = query.strip()
     preferences = load_preferences(user_id) if user_id else {}
-    dislikes = " ".join(preferences.get("dislikes", [])) if preferences else ""
+    preferred_values = [
+        str(value)
+        for key in ("preferred_genres", "preferred_moods", "likes")
+        for value in preferences.get(key, [])
+        if str(value or "").strip()
+    ]
+    dislike_values = [
+        str(value)
+        for value in preferences.get("dislikes", [])
+        if str(value or "").strip()
+    ]
+    preference_terms = _intent_terms(" ".join(preferred_values))
+    dislike_terms = _intent_terms(" ".join(dislike_values))
+    intent_terms = [term for term in _intent_terms(keyword) if term not in dislike_terms]
+    normalized_query = _normalize_match_text(keyword)
     items = get_all_anime()
+    excluded_ids = get_non_recommendable_anime_ids(user_id) if user_id else set()
+    for value in excluded_anime_ids or []:
+        try:
+            excluded_ids.add(int(value))
+        except (TypeError, ValueError):
+            continue
     stats_map = _get_sentiment_stats_map()
+    topic_terms_map = _get_topic_terms_map()
+    knowledge_map = _get_structured_knowledge_map()
+    required_companies = _requested_production_companies(keyword, knowledge_map)
     ranked = []
 
     for item in items:
         anime_id = int(item["id"])
+        if anime_id in excluded_ids:
+            continue
         name = item.get("name", "")
+        normalized_name = _normalize_match_text(name)
+        knowledge = knowledge_map.get(anime_id, {})
+        company_fields = _company_search_fields(knowledge.get("production_companies", []))
+        if required_companies and not required_companies.intersection(company_fields):
+            continue
+        structured_fields = [
+            _normalize_match_text(knowledge.get("summary", "")),
+            *(_normalize_match_text(value) for value in knowledge.get("genres", [])),
+            *(_normalize_match_text(value) for value in knowledge.get("moods", [])),
+            _normalize_match_text(knowledge.get("work_type", "")),
+            _normalize_match_text(knowledge.get("year", "")),
+            *company_fields,
+        ]
+        searchable_fields = [
+            normalized_name,
+            *topic_terms_map.get(anime_id, []),
+            *(field for field in structured_fields if field),
+        ]
         stats = stats_map.get(anime_id, {"positive": 0, "negative": 0, "neutral": 0, "total": 0})
         total = stats.get("total") or 0
         positive_rate = (stats.get("positive", 0) / total) if total else 0
-        similarity = SequenceMatcher(None, keyword, name.lower()).ratio() if keyword else 0
-        if keyword and keyword in name.lower():
-            similarity += 0.5
-        penalty = 0.8 if dislikes and any(word and word.lower() in name.lower() for word in dislikes.split()) else 0
-        match_score = min(1.5, similarity)
-        sentiment_score = positive_rate if total else 0.15
-        popularity_score = min(0.45, math.log1p(max(0, item.get("comment_count", 0))) / 20)
+        if normalized_query and normalized_query == normalized_name:
+            title_match_score = 1.6
+        elif normalized_name and normalized_name in normalized_query:
+            title_match_score = 1.3
+        elif normalized_query and normalized_query in normalized_name:
+            title_match_score = 1.1
+        else:
+            title_hits = [term for term in intent_terms if term in normalized_name]
+            title_match_score = min(0.8, len(title_hits) * 0.25)
+
+        matched_intent_terms = [
+            term for term in intent_terms
+            if _matches_term(term, searchable_fields)
+        ]
+        matched_preference_terms = [
+            term for term in preference_terms
+            if _matches_term(term, searchable_fields)
+        ]
+        matched_dislike_terms = [
+            term for term in dislike_terms
+            if _matches_term(term, searchable_fields)
+        ]
+        intent_match_score = min(1.4, len(matched_intent_terms) * 0.28)
+        preference_bonus = min(0.32, len(matched_preference_terms) * 0.08)
+        penalty = min(1.2, len(matched_dislike_terms) * 0.45)
+        match_score = title_match_score + intent_match_score + preference_bonus
+        sentiment_score = positive_rate * 0.35 if total else 0.05
+        popularity_score = min(
+            0.15,
+            math.log1p(max(0, item.get("comment_count", 0))) / 30,
+        )
         score = match_score + sentiment_score + popularity_score - penalty
+        matched_terms = list(dict.fromkeys(
+            [*matched_intent_terms, *matched_preference_terms]
+        ))
+        match_tags = [f"匹配：{term}" for term in matched_terms[:3]]
+        if positive_rate >= 0.4:
+            match_tags.append("口碑")
+        if not match_tags:
+            match_tags = ["候选", "可探索"]
         ranked.append({
             **item,
             "score": round(score, 4),
             "match_score": round(match_score, 4),
+            "title_match_score": round(title_match_score, 4),
+            "intent_match_score": round(intent_match_score, 4),
+            "preference_bonus": round(preference_bonus, 4),
             "sentiment_score": round(sentiment_score, 4),
             "popularity_score": round(popularity_score, 4),
             "preference_penalty": round(penalty, 4),
@@ -177,7 +417,8 @@ def build_candidate_pool(query: str, user_id: int | None = None, limit: int = 8)
             "sentiment": stats,
             "topics": [],
             "comments": [],
-            "match_tags": ["口碑", "评论证据"] if positive_rate >= 0.4 else ["候选", "可探索"],
+            "match_tags": match_tags,
+            "structured_knowledge": knowledge,
         })
 
     ranked.sort(key=lambda x: (x["score"], x.get("comment_count", 0)), reverse=True)
@@ -290,13 +531,18 @@ def update_user_preferences_tool(user_id: int, updates: dict) -> dict:
 
 
 def _recommend_candidate_from_state(state: dict, anime_id: int) -> dict:
-    """从注入的图状态中取候选，并拒绝候选池之外的 ID。"""
+    """从注入状态中取 eligible 候选，并拒绝未完成证据检索的 ID。"""
+    candidate_items = (
+        state.get("eligible_candidates", [])
+        if "eligible_candidates" in state
+        else state.get("candidates", [])
+    )
     candidates = {
         int(candidate["id"]): candidate
-        for candidate in state.get("candidates", [])
+        for candidate in candidate_items
     }
     if int(anime_id) not in candidates:
-        raise ValueError(f"anime_id {anime_id} is outside the candidate pool")
+        raise ValueError(f"anime_id {anime_id} is outside the eligible candidate pool")
     return candidates[int(anime_id)]
 
 
@@ -307,10 +553,12 @@ def inspect_recommendation_candidate_tool(
 ) -> dict:
     """读取一个候选的已打包统计与证据，不执行写操作。"""
     candidate = _recommend_candidate_from_state(state, anime_id)
+    evidence = state.get("evidence_map", {}).get(int(anime_id), [])
     return {
         "anime_id": int(anime_id),
         "name": candidate.get("name", ""),
-        "platform": candidate.get("platform", ""),
+        "platform": verified_platform_availability(evidence),
+        "data_sources": candidate.get("platform", ""),
         "comment_count": candidate.get("comment_count", 0),
         "scores": {
             key: candidate.get(key, 0)
@@ -324,7 +572,7 @@ def inspect_recommendation_candidate_tool(
         },
         "sentiment": candidate.get("sentiment", {}),
         "topics": candidate.get("topics", []),
-        "evidence": state.get("evidence_map", {}).get(int(anime_id), []),
+        "evidence": evidence,
     }
 
 
@@ -335,9 +583,12 @@ def search_candidate_comments_tool(
     state: Annotated[dict, InjectedState],
 ) -> dict:
     """只在当前候选池指定动漫的范围内检索评论证据。"""
-    _recommend_candidate_from_state(state, anime_id)
+    candidate = _recommend_candidate_from_state(state, anime_id)
     return sanitize_search_result(
-        search_evidence(query, anime_id=int(anime_id), top_k=3)
+        search_evidence(query, anime_id=int(anime_id), top_k=3),
+        query=query,
+        anime_name=str(candidate.get("name") or ""),
+        topics=candidate.get("topics", []),
     )
 
 

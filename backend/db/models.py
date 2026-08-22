@@ -1,4 +1,4 @@
-"""17 张业务表的跨 MySQL/SQLite SQLAlchemy ORM 映射。
+"""19 张业务表的跨 MySQL/SQLite SQLAlchemy ORM 映射。
 
 LangGraph Checkpoint 使用独立数据库，不属于这份 ``Base.metadata``，因此
 业务表建表或迁移不会碰到工作流检查点。
@@ -11,6 +11,7 @@ from typing import Any
 
 from sqlalchemy import (
     JSON,
+    LargeBinary,
     Boolean,
     CheckConstraint,
     DateTime,
@@ -24,7 +25,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
-from sqlalchemy.dialects.mysql import DOUBLE, LONGTEXT
+from sqlalchemy.dialects.mysql import DOUBLE, LONGBLOB, LONGTEXT
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.types import TypeDecorator
 
@@ -42,6 +43,7 @@ MYSQL_TABLE_OPTIONS = {
     "mysql_collate": "utf8mb4_0900_ai_ci",
 }
 LONG_TEXT = Text().with_variant(LONGTEXT(), "mysql")
+BINARY_LARGE = LargeBinary().with_variant(LONGBLOB(), "mysql")
 PRECISE_FLOAT = Float().with_variant(DOUBLE(asdecimal=False), "mysql")
 
 
@@ -181,6 +183,30 @@ class AgentSession(Base):
     updated_at: Mapped[datetime] = mapped_column(PORTABLE_DATETIME, nullable=False, server_default=func.now())
 
 
+class AgentAttachment(Base):
+    __tablename__ = "agent_attachments"
+    __table_args__ = (
+        Index("ix_agent_attachments_user_id_created_at", "user_id", "created_at"),
+        Index("ix_agent_attachments_session_id", "session_id"),
+        Index("ux_agent_attachments_message_id", "message_id", unique=True),
+        MYSQL_TABLE_OPTIONS,
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    session_id: Mapped[int | None] = mapped_column(
+        ForeignKey("agent_sessions.id", ondelete="CASCADE")
+    )
+    message_id: Mapped[int | None] = mapped_column(Integer)
+    content: Mapped[bytes] = mapped_column(BINARY_LARGE, nullable=False)
+    mime_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    byte_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    width: Mapped[int] = mapped_column(Integer, nullable=False)
+    height: Mapped[int] = mapped_column(Integer, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(PORTABLE_DATETIME, nullable=False, server_default=func.now())
+
+
 class WatchGuide(Base):
     __tablename__ = "watch_guides"
     __table_args__ = (
@@ -199,6 +225,33 @@ class WatchGuide(Base):
     anime_key: Mapped[str] = mapped_column(String(64), nullable=False)
     guide_content: Mapped[str] = mapped_column(LONG_TEXT, nullable=False)
     created_at: Mapped[datetime] = mapped_column(PORTABLE_DATETIME, nullable=False, server_default=func.now())
+
+
+class UserAnimeStatus(Base):
+    __tablename__ = "user_anime_statuses"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('watched', 'watching', 'unwatched')",
+            name="valid_status",
+        ),
+        Index("ix_user_anime_statuses_user_status", "user_id", "status"),
+        MYSQL_TABLE_OPTIONS,
+    )
+
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    anime_id: Mapped[int] = mapped_column(
+        ForeignKey("anime.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        PORTABLE_DATETIME,
+        nullable=False,
+        server_default=func.now(),
+    )
 
 
 class AgentMessage(Base):

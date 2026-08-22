@@ -23,9 +23,17 @@ prompts:
       rag-v4-personalized-advisor: adeda5df70a67812f6cdc030edb9fe1f15e88f019c54eef7d20a822c90551c4f
       rag-v5-bounded-reasons: 45c856502749af877889a511962c7b49c7365391114ef5e9951c7d7920b843dc
       rag-v6-bounded-reasons: 47971d428b9a1c8233938aef22acb0bd3a317a17a3d51320416396966e7011d8
+      rag-v7-tool-bounded: 5f9f93b578687b5fd8a98357c6344221bce7ec5ffbcb6613b2bb5aefc6886993
+      rag-v8-soft-reason-length: 615bd46c11e3865fb99de1dc92ef5a55a0d515e3ffaadf4e00b44a0015308865
+  recommendation_chat:
+    versions:
+      v1: f3c93110a73182f7f0dcbafa64ccfb8166021961162f26ce77eaab1915b0d5b4
   recommendation_followup:
     versions:
       v1: 14ef8de50bf589093a98d8678c780015d9357a05570792cde69e2490f04e62d4
+  recommendation_image:
+    versions:
+      v1: dc96c615dc22ab59a7cb7f50ab6f3a2a214318fba2a3f13d8fa032eedd8882f7
   recommendation_intent:
     versions:
       v1: 55fd14495a37b15aa4be47050f5e67f9034cdde80683d33bfceb550324b9980f

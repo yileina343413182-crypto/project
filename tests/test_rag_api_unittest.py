@@ -51,6 +51,8 @@ class RagApiSmokeTest(unittest.TestCase):
         status = status_resp.json()["data"]
         self.assertIn("active_collection", status)
         self.assertIn("embedding", status)
+        self.assertIn("vector_index", status)
+        self.assertIn("vector_index_ready", status)
 
         search_resp = self.client.post(
             "/api/rag/search",

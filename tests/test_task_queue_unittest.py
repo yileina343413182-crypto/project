@@ -134,6 +134,7 @@ class AgentTaskDeliveryTest(unittest.TestCase):
         with (
             patch("backend.agents.memory.orm_session", side_effect=self._session),
             patch("backend.agents.task_queue._dispatch_agent_task", side_effect=complete) as dispatch,
+            patch("backend.agents.task_queue.AgentStreamEmitter.emit", return_value=False),
         ):
             first = execute_agent_task.run(self.task_id)
             second = execute_agent_task.run(self.task_id)

@@ -116,7 +116,7 @@ def compare_business_tables(source, target) -> dict[str, dict[str, str | int]]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="逐行逐列核验 SQLite 与 MySQL 的 17 张业务表")
+    parser = argparse.ArgumentParser(description="逐行逐列核验 SQLite 与 MySQL 的 19 张业务表")
     parser.add_argument("--source", default=DB_PATH, help="源 SQLite 文件路径")
     parser.add_argument("--target-url", default=DATABASE_URL, help="目标 MySQL SQLAlchemy URL")
     args = parser.parse_args()

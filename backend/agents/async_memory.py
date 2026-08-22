@@ -7,12 +7,12 @@
 from __future__ import annotations
 
 import json
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.db.models import AgentMessage, AgentSession, AgentTask
+from backend.db.models import AgentAttachment, AgentMessage, AgentSession, AgentTask
 
 
 def _value(value, default=None):
@@ -59,6 +59,134 @@ async def save_agent_message(
     )
     await session.flush()
     return record.id
+
+
+def _attachment_dict(record: AgentAttachment, *, include_storage: bool = False) -> dict:
+    result = {
+        "id": record.id,
+        "mime_type": record.mime_type,
+        "byte_size": record.byte_size,
+        "width": record.width,
+        "height": record.height,
+        "created_at": _value(record.created_at),
+    }
+    if include_storage:
+        result["content"] = bytes(record.content)
+        result["session_id"] = record.session_id
+        result["message_id"] = record.message_id
+    return result
+
+
+async def create_agent_attachment(
+    session: AsyncSession,
+    user_id: int,
+    stored: dict,
+) -> dict:
+    record = AgentAttachment(user_id=user_id, **stored)
+    session.add(record)
+    await session.flush()
+    return _attachment_dict(record)
+
+
+async def get_agent_attachment(
+    session: AsyncSession,
+    user_id: int,
+    attachment_id: int,
+    *,
+    include_storage: bool = False,
+) -> dict | None:
+    record = await session.scalar(
+        select(AgentAttachment).where(
+            AgentAttachment.id == int(attachment_id),
+            AgentAttachment.user_id == int(user_id),
+        )
+    )
+    return _attachment_dict(record, include_storage=include_storage) if record else None
+
+
+async def get_unbound_agent_attachment(
+    session: AsyncSession,
+    user_id: int,
+    attachment_id: int,
+) -> dict | None:
+    row = (
+        await session.execute(
+            select(
+                AgentAttachment.id,
+                AgentAttachment.mime_type,
+                AgentAttachment.byte_size,
+                AgentAttachment.width,
+                AgentAttachment.height,
+                AgentAttachment.created_at,
+            ).where(
+                AgentAttachment.id == int(attachment_id),
+                AgentAttachment.user_id == int(user_id),
+                AgentAttachment.session_id.is_(None),
+                AgentAttachment.message_id.is_(None),
+            )
+        )
+    ).mappings().first()
+    if row is None:
+        return None
+    result = dict(row)
+    result["created_at"] = _value(result.get("created_at"))
+    return result
+
+
+async def bind_agent_attachment(
+    session: AsyncSession,
+    user_id: int,
+    attachment_id: int,
+    session_id: int,
+    message_id: int,
+) -> bool:
+    """把一次上传原子绑定到一条用户消息，绑定后不能被其他请求复用。"""
+    result = await session.execute(
+        update(AgentAttachment)
+        .where(
+            AgentAttachment.id == int(attachment_id),
+            AgentAttachment.user_id == int(user_id),
+            AgentAttachment.session_id.is_(None),
+            AgentAttachment.message_id.is_(None),
+        )
+        .values(session_id=int(session_id), message_id=int(message_id))
+        .execution_options(synchronize_session=False)
+    )
+    return bool(result.rowcount)
+
+
+async def delete_unbound_agent_attachment(
+    session: AsyncSession,
+    user_id: int,
+    attachment_id: int,
+) -> bool:
+    result = await session.execute(
+        delete(AgentAttachment).where(
+            AgentAttachment.id == int(attachment_id),
+            AgentAttachment.user_id == int(user_id),
+            AgentAttachment.session_id.is_(None),
+            AgentAttachment.message_id.is_(None),
+        )
+    )
+    return bool(result.rowcount)
+
+
+async def purge_stale_unbound_attachments(
+    session: AsyncSession,
+    user_id: int,
+    *,
+    max_age_hours: int = 24,
+) -> int:
+    """清理当前用户因关闭页面而遗留的未绑定上传。"""
+    result = await session.execute(
+        delete(AgentAttachment).where(
+            AgentAttachment.user_id == int(user_id),
+            AgentAttachment.session_id.is_(None),
+            AgentAttachment.message_id.is_(None),
+            AgentAttachment.created_at < datetime.now() - timedelta(hours=max_age_hours),
+        )
+    )
+    return int(result.rowcount or 0)
 
 
 async def create_agent_task(

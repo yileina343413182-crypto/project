@@ -1,19 +1,22 @@
 # -*- coding: utf-8 -*-
 """Smoke tests for the independent async Agent Center API."""
 
+import json
+import io
 import os
 import threading
 import time
 import unittest
 from unittest.mock import patch
 
+from PIL import Image
 from sqlalchemy import func, select
 
 os.environ["LLM_API_KEY"] = ""
 
 from tests.api_test_support import open_test_celery_worker, open_test_client
 from backend.database import orm_session
-from backend.db.models import AgentMessage, AgentSession, AgentTask, WatchGuide
+from backend.db.models import Anime, AgentAttachment, AgentMessage, AgentSession, AgentTask, UserAnimeStatus, WatchGuide
 
 
 def _offline_recommendation(*_args, **_kwargs):
@@ -45,6 +48,19 @@ def _offline_guide(*_args, **_kwargs):
     }
 
 
+def _offline_image(*_args, **_kwargs):
+    return {
+        "context": "画面描述：蓝色天空下的动画角色\n视觉标签：治愈、青春\n识别置信度：medium",
+        "prompt_trace": {},
+    }
+
+
+def _png_bytes():
+    output = io.BytesIO()
+    Image.new("RGB", (24, 18), (40, 120, 220)).save(output, format="PNG")
+    return output.getvalue()
+
+
 class AgentApiSmokeTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -53,6 +69,7 @@ class AgentApiSmokeTest(unittest.TestCase):
             patch("backend.api.agent.run_recommendation_agent", side_effect=_offline_recommendation),
             patch("backend.api.agent.run_recommendation_followup", side_effect=_offline_followup),
             patch("backend.api.agent.generate_watch_guide", side_effect=_offline_guide),
+            patch("backend.api.agent.analyze_recommendation_image", side_effect=_offline_image),
         )
         for patcher in cls.agent_patchers:
             patcher.start()
@@ -64,6 +81,11 @@ class AgentApiSmokeTest(unittest.TestCase):
         cls.token = payload["data"]["token"]
         cls.headers = {"Authorization": f"Bearer {cls.token}"}
         cls.user_id = payload["data"]["user_id"]
+        with orm_session() as session:
+            anime = Anime(name="番剧大全状态测试", platform="test")
+            session.add(anime)
+            session.flush()
+            cls.status_anime_id = anime.id
 
     @classmethod
     def tearDownClass(cls):
@@ -124,6 +146,56 @@ class AgentApiSmokeTest(unittest.TestCase):
         self.assertEqual(payload["code"], 200)
         self.assertIsInstance(payload["data"], list)
 
+    def test_anime_library_statuses_are_private_and_reset_to_unwatched(self):
+        listing = self.client.get("/api/agent/anime-library", headers=self.headers)
+        self.assertEqual(listing.status_code, 200)
+        target = next(
+            item for item in listing.json()["data"]
+            if item["anime_id"] == self.status_anime_id
+        )
+        self.assertEqual(target["status"], "unwatched")
+
+        for status in ("watching", "watched"):
+            updated = self.client.put(
+                f"/api/agent/anime-library/{self.status_anime_id}",
+                headers=self.headers,
+                json={"status": status},
+            )
+            self.assertEqual(updated.status_code, 200)
+            self.assertEqual(updated.json()["data"]["status"], status)
+
+        username = f"lib{time.time_ns() % 100000000}"
+        other = self.client.post(
+            "/api/auth/register",
+            json={"username": username, "password": "password123"},
+        ).json()["data"]
+        other_listing = self.client.get(
+            "/api/agent/anime-library",
+            headers={"Authorization": f"Bearer {other['token']}"},
+        )
+        other_target = next(
+            item for item in other_listing.json()["data"]
+            if item["anime_id"] == self.status_anime_id
+        )
+        self.assertEqual(other_target["status"], "unwatched")
+
+        reset = self.client.put(
+            f"/api/agent/anime-library/{self.status_anime_id}",
+            headers=self.headers,
+            json={"status": "unwatched"},
+        )
+        self.assertEqual(reset.status_code, 200)
+        with orm_session() as session:
+            record = session.get(UserAnimeStatus, (self.user_id, self.status_anime_id))
+            self.assertIsNone(record)
+
+        invalid = self.client.put(
+            f"/api/agent/anime-library/{self.status_anime_id}",
+            headers=self.headers,
+            json={"status": "unknown"},
+        )
+        self.assertEqual(invalid.status_code, 400)
+
     def test_recommendation_agent_creates_async_task_and_result(self):
         resp = self.client.post(
             "/api/agent/recommend/start",
@@ -141,6 +213,90 @@ class AgentApiSmokeTest(unittest.TestCase):
         self.assertEqual(task["progress"], 100)
         self.assertIn("result", task)
         self.assertIn("result", task["result"])
+
+    def test_recommendation_image_is_private_bound_by_id_and_cascades_with_session(self):
+        unauthenticated = self.client.post(
+            "/api/agent/attachments/images",
+            content=_png_bytes(),
+            headers={"Content-Type": "image/png"},
+        )
+        self.assertEqual(unauthenticated.status_code, 401)
+
+        invalid = self.client.post(
+            "/api/agent/attachments/images",
+            content=b"<svg></svg>",
+            headers={**self.headers, "Content-Type": "image/svg+xml"},
+        )
+        self.assertEqual(invalid.status_code, 400)
+
+        uploaded = self.client.post(
+            "/api/agent/attachments/images",
+            content=_png_bytes(),
+            headers={**self.headers, "Content-Type": "image/png"},
+        )
+        self.assertEqual(uploaded.status_code, 200)
+        attachment = uploaded.json()["data"]
+        attachment_id = attachment["id"]
+        self.assertNotIn("content", attachment)
+
+        other = self.client.post(
+            "/api/auth/register",
+            json={"username": f"img{time.time_ns() % 100000000}", "password": "password123"},
+        ).json()["data"]
+        other_headers = {"Authorization": f"Bearer {other['token']}"}
+        private_read = self.client.get(
+            f"/api/agent/attachments/{attachment_id}/content",
+            headers=other_headers,
+        )
+        self.assertEqual(private_read.status_code, 404)
+        private_use = self.client.post(
+            "/api/agent/recommend/start",
+            headers=other_headers,
+            json={"query": "", "attachment_id": attachment_id},
+        )
+        self.assertEqual(private_use.status_code, 404)
+
+        started = self.client.post(
+            "/api/agent/recommend/start",
+            headers=self.headers,
+            json={
+                "query": "",
+                "attachment_id": attachment_id,
+                "client_request_id": f"image-{time.time_ns()}",
+            },
+        )
+        self.assertEqual(started.status_code, 200)
+        task = self.wait_for_task(started.json()["data"]["task_id"])
+        self.assertEqual(task["status"], "succeeded")
+        self.assertEqual(task["input"]["attachment_id"], attachment_id)
+        self.assertNotIn("base64", json.dumps(task["input"]))
+
+        session_id = started.json()["data"]["session_id"]
+        detail = self.client.get(
+            f"/api/agent/sessions/{session_id}",
+            headers=self.headers,
+        ).json()["data"]
+        user_message = next(item for item in detail["messages"] if item["role"] == "user")
+        self.assertEqual(user_message["metadata"]["attachment"]["id"], attachment_id)
+        self.assertNotIn("content", user_message["metadata"]["attachment"])
+
+        bound_delete = self.client.delete(
+            f"/api/agent/attachments/{attachment_id}",
+            headers=self.headers,
+        )
+        self.assertEqual(bound_delete.status_code, 404)
+        deleted_session = self.client.delete(
+            f"/api/agent/sessions/{session_id}",
+            headers=self.headers,
+        )
+        self.assertEqual(deleted_session.status_code, 200)
+        with orm_session() as session:
+            remaining = session.scalar(
+                select(func.count()).select_from(AgentAttachment).where(
+                    AgentAttachment.id == attachment_id
+                )
+            )
+        self.assertEqual(remaining, 0)
 
     def test_request_id_is_idempotent_and_turn_sequence_is_monotonic(self):
         request_id = f"idem-{time.time_ns()}"
@@ -410,7 +566,23 @@ class AgentApiSmokeTest(unittest.TestCase):
 
         forbidden = self.client.get(f"/api/agent/tasks/{task_id}", headers=other_headers)
         self.assertEqual(forbidden.status_code, 404)
-        self.assertEqual(self.wait_for_task(task_id)["status"], "succeeded")
+        task = self.wait_for_task(task_id)
+        self.assertEqual(task["status"], "succeeded")
+
+        forbidden_stream = self.client.get(
+            f"/api/agent/tasks/{task_id}/events",
+            headers=other_headers,
+        )
+        self.assertEqual(forbidden_stream.status_code, 404)
+
+        stream = self.client.get(
+            f"/api/agent/tasks/{task_id}/events",
+            headers=self.headers,
+        )
+        self.assertEqual(stream.status_code, 200)
+        events = [json.loads(line) for line in stream.text.splitlines() if line]
+        self.assertEqual(events[0]["type"], "connected")
+        self.assertEqual(events[-1]["type"], "result_ready")
 
     def test_opinion_agent_requires_target(self):
         resp = self.client.post("/api/agent/opinion/analyze", headers=self.headers, json={})

@@ -62,6 +62,11 @@ $env:RECOMMEND_CHECKPOINT_REDIS_URL=$env:REDIS_URL
 $env:RECOMMEND_CHECKPOINT_SQLITE_FALLBACK="false"
 $env:RECOMMEND_CHECKPOINT_TTL_MINUTES="1440"
 $env:RECOMMEND_REDIS_MAX_CONNECTIONS="4"
+$env:AGENT_STREAM_ENABLED="true"
+$env:AGENT_STREAM_TTL_SECONDS="900"
+$env:AGENT_STREAM_MAX_EVENTS="256"
+$env:AGENT_STREAM_BLOCK_MS="10000"
+$env:AGENT_STREAM_MAX_CONNECTIONS="4"
 $env:CELERY_VISIBILITY_TIMEOUT="3600"
 $env:AGENT_TASK_LEASE_SECONDS="180"
 $env:AGENT_TASK_HEARTBEAT_SECONDS="30"
@@ -74,6 +79,11 @@ $env:AGENT_TASK_RECOVERY_INTERVAL_SECONDS="120"
 
 `RECOMMEND_CHECKPOINT_SQLITE_FALLBACK` 默认只在 `APP_DEBUG=true` 时开启。生产必须关闭，
 以免 Redis 故障时多个 Worker 各自写本机 SQLite，造成检查点分裂。
+
+Agent 流式事件只在 Redis 中短期保存阶段状态和推荐追问的文本增量，完整推荐卡片、
+舆情报告、评论证据和最终消息仍从 SQL 任务/会话读取。流式连接失败时前端会继续使用
+原有轮询。`AGENT_STREAM_MAX_CONNECTIONS` 是 API 进程允许的同时流连接上限，超出的请求
+会降级轮询；Cloud Free 环境不要盲目调大。
 
 ## 4. 重启与重复投递语义
 
@@ -96,8 +106,13 @@ celery -A backend.celery_app:celery_app inspect active
 celery -A backend.celery_app:celery_app inspect reserved
 ```
 
-前端继续轮询 `/api/agent/tasks/{task_id}`。默认不保存 Celery result；SQL 状态表不能被
-result backend 替代，也不应把 Redis 直接暴露给浏览器。
+前端通过鉴权接口 `/api/agent/tasks/{task_id}/events` 读取 NDJSON 增量事件，同时保留
+`/api/agent/tasks/{task_id}` 轮询。默认不保存 Celery result；SQL 状态表不能被 result
+backend 替代，也不应把 Redis 直接暴露给浏览器。
+
+推荐 Agent 的图片附件保存在业务数据库 `agent_attachments` 中。Celery 任务、Redis broker
+和流事件只传 `attachment_id`；Worker 按用户与会话复核归属后，使用统一的 `LLM_MODEL`
+执行图片理解，不需要单独配置视觉模型。
 
 Redis Cloud Free 的配置和验收步骤见
 [`redis-cloud-free.md`](redis-cloud-free.md)。

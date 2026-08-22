@@ -277,6 +277,49 @@ def count_documents(collection_name: str | None = None) -> int:
         return int(session.scalar(statement) or 0)
 
 
+def get_anime_documents(
+    anime_id: int,
+    source_types: set[str] | tuple[str, ...],
+    collection_name: str | None = None,
+    limit: int = 10,
+) -> list[dict]:
+    """按作品和来源类型读取活动集合中的结构化文档。"""
+    collection_name = collection_name or get_active_collection()
+    cleaned_types = {str(value).strip() for value in source_types if str(value).strip()}
+    if not collection_name or not cleaned_types or limit <= 0:
+        return []
+    with orm_session() as session:
+        rows = session.scalars(
+            select(RagDocument)
+            .where(
+                RagDocument.collection_name == collection_name,
+                RagDocument.anime_id == int(anime_id),
+                RagDocument.source_type.in_(cleaned_types),
+            )
+            .order_by(RagDocument.updated_at.desc(), RagDocument.id)
+            .limit(limit)
+        ).all()
+
+    result = []
+    for rank, row in enumerate(rows, start=1):
+        metadata = _json_value(row.document_metadata, {})
+        metadata.setdefault("doc_id", row.doc_id)
+        metadata.setdefault("anime_id", row.anime_id)
+        metadata.setdefault("anime_name", row.anime_name or "")
+        metadata.setdefault("source_type", row.source_type)
+        result.append({
+            "doc_id": row.doc_id,
+            "content": row.content,
+            "full_content": row.content,
+            "metadata": metadata,
+            "similarity": 1.0,
+            "rank": rank,
+            "source_type": row.source_type,
+            "source_label": _source_label(metadata),
+        })
+    return result
+
+
 def keyword_search_documents(
     query: str,
     collection_name: str | None,

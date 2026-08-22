@@ -113,8 +113,12 @@
 - `POST /api/recommend`
 - `POST /api/agent/recommend/start`（JWT 保护）
 - `POST /api/agent/recommend/message`（JWT 保护）
+- `POST /api/agent/attachments/images`（JWT 保护，推荐 Agent 单图上传）
+- `GET /api/agent/attachments/<attachment_id>/content`（JWT 保护）
+- `DELETE /api/agent/attachments/<attachment_id>`（JWT 保护，仅未绑定图片）
 - `POST /api/agent/opinion/analyze`（JWT 保护）
 - `GET /api/agent/tasks/<task_id>`（JWT 保护）
+- `GET /api/agent/tasks/<task_id>/events`（JWT 保护，NDJSON流）
 - `GET /api/agent/sessions`（JWT 保护）
 - `GET /api/agent/sessions/<session_id>`（JWT 保护）
 - `DELETE /api/agent/sessions/<session_id>`（JWT 保护）
