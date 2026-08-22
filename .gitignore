@@ -51,6 +51,3 @@ celerybeat-schedule.*
 .DS_Store
 Thumbs.db
 
-# Personal document excluded from publication
-/胡斌的简历.pdf
-/简历.pdf
