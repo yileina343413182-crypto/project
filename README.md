@@ -696,7 +696,7 @@ project/
 │   ├── config.py                   # 全局配置（DB路径、端口、LLM Key、JWT密钥）
 │   ├── security.py                 # HS256 JWT 签发与认证依赖
 │   ├── database.py                 # 同步业务查询兼容入口
-│   ├── db/                         # 18 表 ORM、同步/异步 Session 与 Repository
+│   ├── db/                         # 21 表 ORM、同步/异步 Session 与 Repository
 │   ├── api/
 │   │   ├── auth.py                 # POST /register /login, GET /me（JWT 保护）
 │   │   ├── data.py                 # GET /anime/list, GET /comments/<id>（分页+情感过滤）
@@ -1040,7 +1040,7 @@ python -m topic.lda_model --anime_id 1 --find_best --min_topics 3 --max_topics 1
 
 ## 数据库结构速览
 
-当前 Schema 为 MySQL 8 上的 18 张 SQLAlchemy 业务表；SQLite 保留相同映射以
+当前 Schema 为 MySQL 8 上的 21 张 SQLAlchemy 业务表；SQLite 保留相同映射以
 支持迁移和测试。完整分组、兼容规则和迁移方式见[第 14 节](#14-数据库设计)，
 实际列定义以 `backend/db/models.py` 为准。
 
