@@ -16,7 +16,7 @@ os.environ["LLM_API_KEY"] = ""
 
 from tests.api_test_support import open_test_celery_worker, open_test_client
 from backend.database import orm_session
-from backend.db.models import Anime, AgentAttachment, AgentMessage, AgentSession, AgentTask, UserAnimeStatus, WatchGuide
+from backend.db.models import Anime, AgentAttachment, AgentMessage, AgentSession, AgentTask, UserAnimeStatus, UserMemoryFact, WatchGuide
 
 
 def _offline_recommendation(*_args, **_kwargs):
@@ -55,6 +55,41 @@ def _offline_image(*_args, **_kwargs):
     }
 
 
+def _offline_turn_route(
+    query,
+    _history=None,
+    *,
+    has_recommendation_context=False,
+    watch_guide_state=None,
+    has_attachment=False,
+    initial_turn=False,
+    **_kwargs,
+):
+    normalized = "".join(str(query or "").split()).strip("，。！？!? ")
+    pending = (watch_guide_state or {}).get("pending_offer") or {}
+    if (
+        (pending and normalized in {"需要", "要", "可以", "好的", "加入", "保存"})
+        or ("指南" in normalized and any(term in normalized for term in ("加入", "添加", "保存")))
+    ):
+        action = "add_watch_guide"
+    elif pending and normalized in {"不需要", "不用", "不要", "算了"}:
+        action = "chat"
+    elif has_attachment or initial_turn or "推荐" in normalized:
+        action = "recommendation"
+    elif has_recommendation_context:
+        action = "followup"
+    else:
+        action = "chat"
+    return {
+        "action": action,
+        "reason": "离线测试路由",
+        "matched_signals": [],
+        "target_anime_name": "",
+        "resume_preference": False,
+        "confidence": 1.0,
+    }
+
+
 def _png_bytes():
     output = io.BytesIO()
     Image.new("RGB", (24, 18), (40, 120, 220)).save(output, format="PNG")
@@ -70,6 +105,7 @@ class AgentApiSmokeTest(unittest.TestCase):
             patch("backend.api.agent.run_recommendation_followup", side_effect=_offline_followup),
             patch("backend.api.agent.generate_watch_guide", side_effect=_offline_guide),
             patch("backend.api.agent.analyze_recommendation_image", side_effect=_offline_image),
+            patch("backend.api.agent.route_recommendation_turn", side_effect=_offline_turn_route),
         )
         for patcher in cls.agent_patchers:
             patcher.start()
@@ -145,6 +181,69 @@ class AgentApiSmokeTest(unittest.TestCase):
         payload = resp.json()
         self.assertEqual(payload["code"], 200)
         self.assertIsInstance(payload["data"], list)
+
+    def test_recommendation_memories_are_private_and_exactly_forgettable(self):
+        unique = str(time.time_ns())
+        with orm_session() as session:
+            record = UserMemoryFact(
+                user_id=self.user_id,
+                memory_type="mood_preference",
+                memory_key=f"测试{unique}"[:64],
+                memory_value={"text": f"测试长期偏好{unique}"},
+                normalized_value=f"测试长期偏好{unique}"[:191],
+                memory_hash=(unique * 4)[:64],
+                polarity="positive",
+                strength="soft",
+                confidence=1.0,
+                source_type="explicit",
+                occurrence_count=1,
+                status="active",
+            )
+            session.add(record)
+            session.flush()
+            memory_id = record.id
+
+        listed = self.client.get("/api/agent/memories", headers=self.headers)
+        self.assertEqual(listed.status_code, 200)
+        self.assertTrue(
+            any(item["id"] == memory_id for item in listed.json()["data"]["items"])
+        )
+        edited = self.client.patch(
+            f"/api/agent/memories/{memory_id}",
+            headers=self.headers,
+            json={"value": f"修改后的长期偏好{unique}", "strength": "hard"},
+        )
+        self.assertEqual(edited.status_code, 200)
+        self.assertEqual(edited.json()["data"]["strength"], "hard")
+        self.assertEqual(
+            edited.json()["data"]["value"]["text"],
+            f"修改后的长期偏好{unique}",
+        )
+
+        other = self.client.post(
+            "/api/auth/register",
+            json={
+                "username": f"mem{time.time_ns() % 100000000}",
+                "password": "password123",
+            },
+        ).json()["data"]
+        other_headers = {"Authorization": f"Bearer {other['token']}"}
+        hidden = self.client.delete(
+            f"/api/agent/memories/{memory_id}",
+            headers=other_headers,
+        )
+        self.assertEqual(hidden.status_code, 404)
+
+        removed = self.client.delete(
+            f"/api/agent/memories/{memory_id}",
+            headers=self.headers,
+        )
+        self.assertEqual(removed.status_code, 200)
+        missing = self.client.delete(
+            f"/api/agent/memories/{memory_id}",
+            headers=self.headers,
+        )
+        self.assertEqual(missing.status_code, 404)
 
     def test_anime_library_statuses_are_private_and_reset_to_unwatched(self):
         listing = self.client.get("/api/agent/anime-library", headers=self.headers)

@@ -173,6 +173,7 @@ def run_recommendation_followup(
     query: str,
     history: list[dict] | None,
     recommendation_context: dict,
+    memory_context: dict | None = None,
     on_text_delta: Callable[[str], Any] | None = None,
 ) -> dict:
     """基于最近推荐与对话历史生成详细普通文本，不返回推荐 Schema。"""
@@ -182,7 +183,12 @@ def run_recommendation_followup(
     history_check = inspect_untrusted_text(
         json.dumps(compact, ensure_ascii=False),
         source="conversation_history",
-        max_chars=4000,
+        max_chars=6000,
+    )
+    memory_check = inspect_untrusted_text(
+        json.dumps(memory_context or {}, ensure_ascii=False),
+        source="recommendation_context_memory",
+        max_chars=6000,
     )
     recommendation_check = inspect_untrusted_text(
         json.dumps(recommendation_context, ensure_ascii=False),
@@ -191,13 +197,18 @@ def run_recommendation_followup(
     )
     security = {
         "risk": max(
-            (query_check, history_check, recommendation_check),
+            (query_check, history_check, memory_check, recommendation_check),
             key=lambda item: item["score"],
         )["risk"],
         "flags": sorted(
             {
                 flag
-                for inspection in (query_check, history_check, recommendation_check)
+                for inspection in (
+                    query_check,
+                    history_check,
+                    memory_check,
+                    recommendation_check,
+                )
                 for flag in inspection["flags"]
             }
         ),
@@ -228,6 +239,7 @@ def run_recommendation_followup(
     prompt = prompt_template.render(
         query=query_check["sanitized_text"],
         history=history_check["sanitized_text"],
+        memory_context=memory_check["sanitized_text"],
         recommendations=recommendation_check["sanitized_text"],
     )
     try:

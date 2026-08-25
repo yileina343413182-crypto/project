@@ -4,9 +4,12 @@ active_versions:
   anime_description_search: v1
   evidence_answering: rag-v1
   opinion_report: rag-v2-injection-guard
-  recommendation: rag-v8-soft-reason-length
-  recommendation_chat: v1
-  recommendation_followup: v1
+  recommendation: rag-v9-context-memory
+  recommendation_chat: v2-context-memory
+  recommendation_followup: v2-context-memory
   recommendation_image: v1
   recommendation_intent: v1
+  recommendation_router: v2-context-memory
+  recommendation_memory_extract: v1
+  recommendation_memory_summary: v1
   watch_guide: v1

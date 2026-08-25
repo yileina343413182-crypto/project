@@ -12,7 +12,7 @@ import re
 from typing import Any
 
 from backend.agents.fallback import build_recommendation_fallback
-from backend.config import RECOMMEND_LLM_MAX_TOKENS, RECOMMEND_PROMPT_MAX_CHARS
+from backend.config import RECOMMEND_LLM_MAX_TOKENS, RECOMMEND_PROMPT_MAX_TOKENS
 from backend.prompts.registry import get_prompt
 from backend.agents.schemas import (
     AgentStep,
@@ -105,6 +105,27 @@ def _structured(model, prompt, prompt_template=None):
         ("human", prompt)])
     return _dump_schema(response)
 
+
+_TOKEN_PIECE = re.compile(r"[\u3400-\u9fff]|[A-Za-z0-9_]+|[^\s]", re.UNICODE)
+
+
+def _estimate_prompt_tokens(value: str) -> int:
+    """Conservatively estimate mixed Chinese/Latin prompt tokens without a model download."""
+    total = 0
+    for match in _TOKEN_PIECE.finditer(str(value or "")):
+        piece = match.group(0)
+        total += (len(piece) + 3) // 4 if re.fullmatch(r"[A-Za-z0-9_]+", piece) else 1
+    return total
+
+
+def _complete_text_segments(value: str) -> list[str]:
+    """Split text into removable whole clauses instead of slicing through a sentence."""
+    return [
+        segment
+        for segment in re.findall(r".*?(?:[。！？!?；;\n]+|$)", str(value or ""), re.DOTALL)
+        if segment
+    ]
+
 def _render_bounded_prompt(
     user_id,
     query,
@@ -112,34 +133,88 @@ def _render_bounded_prompt(
     candidates,
     history,
     prompt_template=None,
+    memory_context=None,
 ):
-    """超预算时依次丢弃多余证据、主题和最早历史，再渲染提示词。"""
+    """按完整结构降级上下文，避免在 JSON、句子或模板边界中间切断。"""
     import copy
     actual_prompt = prompt_template or get_prompt("recommendation")
     items = copy.deepcopy(candidates); compact = compact_history(history)
+    prefs = copy.deepcopy(preferences)
+    memories = copy.deepcopy(memory_context or {})
+    query_segments = _complete_text_segments(query)
+    bounded_query = "".join(query_segments).strip()
+    omitted_query = "[用户请求过长，已按完整句边界省略]"
+    trimmed_sections = []
+
     def render():
-        return actual_prompt.render(user_id=user_id, query=query,
-            preferences=json.dumps(preferences, ensure_ascii=False, separators=(",", ":")),
+        return actual_prompt.render(user_id=user_id, query=bounded_query,
+            preferences=json.dumps(prefs, ensure_ascii=False, separators=(",", ":")),
+            memory_context=json.dumps(memories, ensure_ascii=False, separators=(",", ":")),
             candidates=json.dumps(items, ensure_ascii=False, separators=(",", ":")),
             history=json.dumps(compact, ensure_ascii=False, separators=(",", ":")), evidence="inside candidates")
+
+    schema = json.dumps(LLMRecommendationResponse.model_json_schema(), ensure_ascii=False)
+    system_prompt = actual_prompt.render_system()
+    fixed_tokens = _estimate_prompt_tokens(system_prompt) + _estimate_prompt_tokens(schema)
     prompt = render()
-    while len(prompt) > RECOMMEND_PROMPT_MAX_CHARS:
+    prompt_tokens = _estimate_prompt_tokens(prompt)
+    while fixed_tokens + prompt_tokens > RECOMMEND_PROMPT_MAX_TOKENS:
         changed = False
         for item in reversed(items):
             if len(item.get("evidence", [])) > 1:
-                item["evidence"].pop(); changed = True; break
+                item["evidence"].pop(); changed = True; trimmed_sections.append("evidence"); break
         if not changed:
             for item in reversed(items):
                 if item.get("topics"):
-                    item["topics"].pop(); changed = True; break
+                    item["topics"].pop(); changed = True; trimmed_sections.append("topics"); break
+        if not changed and memories.get("long_term_memories"):
+            memories["long_term_memories"].pop(); changed = True; trimmed_sections.append("long_term_memories")
         if not changed and compact:
-            compact.pop(0); changed = True
-        if not changed: break
+            compact.pop(0); changed = True; trimmed_sections.append("history")
+        if not changed and memories.get("older_uncompressed_messages"):
+            memories["older_uncompressed_messages"].pop(0); changed = True; trimmed_sections.append("older_messages")
+        if not changed:
+            for item in reversed(items):
+                if item.get("evidence"):
+                    item["evidence"].pop(); changed = True; trimmed_sections.append("evidence"); break
+        if not changed and memories.get("summary"):
+            memories["summary"] = ""; changed = True; trimmed_sections.append("summary")
+        if not changed and memories.get("working_state"):
+            memories["working_state"] = {}; changed = True; trimmed_sections.append("working_state")
+        if not changed:
+            for field in ("structured_knowledge", "data_sources", "match_tags", "field_coverage", "evidence_gaps"):
+                target = next((item for item in reversed(items) if item.get(field)), None)
+                if target is not None:
+                    target.pop(field, None); changed = True; trimmed_sections.append(field); break
+        if not changed and len(items) > 3:
+            items.pop(); changed = True; trimmed_sections.append("candidate")
+        if not changed:
+            keys = [key for key in prefs if key != "dislikes"] + (["dislikes"] if "dislikes" in prefs else [])
+            for key in keys:
+                if isinstance(prefs.get(key), list) and prefs[key]:
+                    prefs[key].pop(); changed = True; trimmed_sections.append("preferences"); break
+        if not changed and len(query_segments) > 1:
+            query_segments = query_segments[:max(1, len(query_segments) // 2)]
+            bounded_query = "".join(query_segments).strip()
+            changed = True; trimmed_sections.append("query")
+        elif not changed and bounded_query and bounded_query != omitted_query:
+            bounded_query = omitted_query
+            changed = True; trimmed_sections.append("query")
+        if not changed:
+            break
         prompt = render()
-    schema_chars = len(json.dumps(LLMRecommendationResponse.model_json_schema(), ensure_ascii=False))
-    return prompt[:RECOMMEND_PROMPT_MAX_CHARS], {"prompt_chars": min(len(prompt), RECOMMEND_PROMPT_MAX_CHARS),
+        prompt_tokens = _estimate_prompt_tokens(prompt)
+    estimated_input_tokens = fixed_tokens + prompt_tokens
+    return prompt, {"prompt_chars": len(prompt), "prompt_tokens": prompt_tokens,
         "candidate_context_chars": len(json.dumps(items, ensure_ascii=False)), "history_chars": len(json.dumps(compact, ensure_ascii=False)),
-        "schema_chars": schema_chars, "estimated_input_tokens": int((len(prompt)+schema_chars)/1.5), "max_output_tokens": RECOMMEND_LLM_MAX_TOKENS}
+        "memory_context_chars": len(json.dumps(memories, ensure_ascii=False)),
+        "schema_chars": len(schema), "schema_tokens": _estimate_prompt_tokens(schema),
+        "system_tokens": _estimate_prompt_tokens(system_prompt),
+        "estimated_input_tokens": estimated_input_tokens,
+        "max_input_tokens": RECOMMEND_PROMPT_MAX_TOKENS,
+        "budget_exceeded": estimated_input_tokens > RECOMMEND_PROMPT_MAX_TOKENS,
+        "trimmed_sections": list(dict.fromkeys(trimmed_sections)),
+        "max_output_tokens": RECOMMEND_LLM_MAX_TOKENS}
 
 def _local_result(query, candidates, preferences, evidence_map, steps, trace, reason, diagnostics, budget=None, required_count=None):
     """把本地推荐补齐为与正常 LLM 路径一致的响应与追踪字段。"""
@@ -168,6 +243,7 @@ def run_recommendation_agent(
     task_id: int | None = None,
     excluded_anime_ids: list[int] | None = None,
     force_recommendation: bool = False,
+    memory_context: dict | None = None,
 ) -> dict:
     """兼容旧调用方的公开入口，实际委托给 LangGraph 工作流。"""
     from backend.agents.recommend_graph import run_recommendation_graph
@@ -179,6 +255,7 @@ def run_recommendation_agent(
         task_id=task_id,
         excluded_anime_ids=excluded_anime_ids,
         force_recommendation=force_recommendation,
+        memory_context=memory_context,
     )
 
 

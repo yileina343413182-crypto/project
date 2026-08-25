@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """待看番剧指南的确定性状态、作品解析、内容生成与同步持久化。
 
-本模块不负责 HTTP 路由。API 层只需要传入完整历史恢复状态，并在后台任务中
-调用生成和保存函数。是否确认加入由本地规则决定，不能交给回答模型猜测。
+本模块不负责 HTTP 路由。上游结构化路由只选择动作；具体作品解析、状态恢复、
+重复检查、指南生成和持久化仍由本模块的确定性逻辑完成。
 """
 
 from __future__ import annotations
@@ -696,6 +696,7 @@ def save_watch_guide_with_message(
     payload: dict,
     *,
     task_id: int | None = None,
+    complete_task: bool = True,
 ) -> dict:
     """原子保存指南、确认消息与会话时间；相同用户/作品不覆盖已有内容。"""
     reference = _anime_reference(anime, source="persistence")
@@ -732,13 +733,14 @@ def save_watch_guide_with_message(
         if duplicate_message is not None:
             duplicate_payload = _as_dict(duplicate_message.message_metadata)
             result_payload = duplicate_payload or stored_payload
-            _complete_task_in_transaction(
-                session,
-                task_id,
-                int(user_id),
-                int(session_id),
-                result_payload,
-            )
+            if complete_task:
+                _complete_task_in_transaction(
+                    session,
+                    task_id,
+                    int(user_id),
+                    int(session_id),
+                    result_payload,
+                )
             return result_payload
 
         created = _insert_guide_if_absent(
@@ -793,11 +795,12 @@ def save_watch_guide_with_message(
         )
         session.flush()
         stored_payload["message_id"] = message.id
-        _complete_task_in_transaction(
-            session,
-            task_id,
-            int(user_id),
-            int(session_id),
-            stored_payload,
-        )
+        if complete_task:
+            _complete_task_in_transaction(
+                session,
+                task_id,
+                int(user_id),
+                int(session_id),
+                stored_payload,
+            )
         return stored_payload

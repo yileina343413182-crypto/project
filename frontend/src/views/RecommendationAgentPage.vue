@@ -17,6 +17,7 @@
         <p>多轮澄清 · 偏好记忆 · 智能推荐</p>
       </div>
       <div class="top-actions">
+        <button class="memory-button top-memory" type="button" @click="openMemories">🧠 记忆</button>
         <button class="anime-library-button top-anime-library" type="button" @click="openAnimeLibrary">▦ 番剧大全</button>
         <button class="watch-guide-button top-watch-guide" type="button" @click="openWatchGuides">📺 待看番剧指南</button>
         <button class="new-chat top-new-chat" type="button" :disabled="submitting || sessionLoading" @click="newChat">＋ 新建对话</button>
@@ -48,6 +49,7 @@
           <button type="button" class="sidebar-close" aria-label="关闭历史会话" @click="setSidebarOpen(false)">×</button>
         </div>
 
+        <button class="memory-button sidebar-memory" type="button" @click="openMemories">🧠 记忆管理</button>
         <button class="anime-library-button sidebar-anime-library" type="button" @click="openAnimeLibrary">▦ 番剧大全</button>
         <button class="watch-guide-button sidebar-watch-guide" type="button" @click="openWatchGuides">📺 待看番剧指南</button>
         <button class="new-chat sidebar-new-chat" type="button" :disabled="submitting || sessionLoading" @click="newChat">＋ 新建对话</button>
@@ -203,6 +205,7 @@
       </section>
     </div>
     <p v-if="pageNotice" class="page-notice" role="alert">{{ pageNotice }}</p>
+    <MemoryDrawer :open="memoryOpen" @close="closeMemories" />
     <WatchGuideDrawer :open="watchGuideOpen" @close="closeWatchGuides" />
     <AnimeLibraryDrawer :open="animeLibraryOpen" @close="closeAnimeLibrary" />
   </main>
@@ -225,6 +228,7 @@ import {
 } from '../api'
 import RecommendationResult from '../components/agent/RecommendationResult.vue'
 import AnimeLibraryDrawer from '../components/agent/AnimeLibraryDrawer.vue'
+import MemoryDrawer from '../components/agent/MemoryDrawer.vue'
 import WatchGuideDrawer from '../components/agent/WatchGuideDrawer.vue'
 
 const input = ref('')
@@ -245,9 +249,10 @@ const messageListRef = ref(null)
 const sidebarOpen = ref(false)
 const isMobile = ref(false)
 const pageNotice = ref('')
+const memoryOpen = ref(false)
 const watchGuideOpen = ref(false)
 const animeLibraryOpen = ref(false)
-const drawerOpen = computed(() => watchGuideOpen.value || animeLibraryOpen.value)
+const drawerOpen = computed(() => memoryOpen.value || watchGuideOpen.value || animeLibraryOpen.value)
 
 let pollTimer = null
 let streamController = null
@@ -389,6 +394,7 @@ function setSidebarOpen(open) {
 
 function openWatchGuides() {
   setSidebarOpen(false)
+  memoryOpen.value = false
   animeLibraryOpen.value = false
   watchGuideOpen.value = true
 }
@@ -399,12 +405,24 @@ function closeWatchGuides() {
 
 function openAnimeLibrary() {
   setSidebarOpen(false)
+  memoryOpen.value = false
   watchGuideOpen.value = false
   animeLibraryOpen.value = true
 }
 
 function closeAnimeLibrary() {
   animeLibraryOpen.value = false
+}
+
+function openMemories() {
+  setSidebarOpen(false)
+  watchGuideOpen.value = false
+  animeLibraryOpen.value = false
+  memoryOpen.value = true
+}
+
+function closeMemories() {
+  memoryOpen.value = false
 }
 
 function updateViewport() {
@@ -835,7 +853,8 @@ function formatMessageTime(value) {
 
 function handleEscape(event) {
   if (event.key !== 'Escape') return
-  if (animeLibraryOpen.value) closeAnimeLibrary()
+  if (memoryOpen.value) closeMemories()
+  else if (animeLibraryOpen.value) closeAnimeLibrary()
   else if (watchGuideOpen.value) closeWatchGuides()
   else setSidebarOpen(false)
 }
@@ -893,6 +912,16 @@ onBeforeUnmount(() => {
 .nav-link { flex-shrink: 0; color: var(--neon-cyan); font-size: 12px; }
 .sidebar-toggle, .sidebar-close { display: none; }
 .top-actions { display: flex; align-items: center; gap: 9px; }
+.memory-button {
+  height: 38px;
+  padding: 0 15px;
+  border: 1px solid rgba(73, 217, 177, 0.3);
+  border-radius: 8px;
+  background: rgba(73, 217, 177, 0.08);
+  color: #78e7c7;
+  cursor: pointer;
+}
+.memory-button:hover { border-color: rgba(73, 217, 177, 0.55); background: rgba(73, 217, 177, 0.14); }
 .anime-library-button {
   height: 38px;
   padding: 0 15px;
@@ -942,6 +971,7 @@ onBeforeUnmount(() => {
 .sidebar-head { display: flex; align-items: center; justify-content: space-between; padding: 0 6px 16px; }
 .sidebar-head span { color: var(--neon-cyan); font-family: var(--font-mono); font-size: 9px; letter-spacing: 1.5px; }
 .sidebar-head h2 { margin-top: 5px; color: var(--text-primary); font-size: 18px; }
+.sidebar-memory { display: none; width: 100%; margin-bottom: 8px; }
 .sidebar-anime-library { display: none; width: 100%; margin-bottom: 8px; }
 .sidebar-watch-guide { display: none; width: 100%; margin-bottom: 8px; }
 .sidebar-new-chat { display: none; width: 100%; margin-bottom: 14px; }
@@ -1188,7 +1218,7 @@ onBeforeUnmount(() => {
     transition: transform 0.2s ease;
   }
   .session-sidebar.open { transform: translateX(0); visibility: visible; }
-  .sidebar-anime-library, .sidebar-watch-guide { display: block; }
+  .sidebar-memory, .sidebar-anime-library, .sidebar-watch-guide { display: block; }
   .sidebar-new-chat { display: block; }
   .sidebar-mask { display: block; position: fixed; inset: 64px 0 0; z-index: 40; border: 0; background: rgba(0, 0, 0, 0.55); }
   .conversation-stage { height: 100%; padding: 10px; }

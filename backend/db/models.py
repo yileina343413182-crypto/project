@@ -1,4 +1,4 @@
-"""19 张业务表的跨 MySQL/SQLite SQLAlchemy ORM 映射。
+"""21 张业务表的跨 MySQL/SQLite SQLAlchemy ORM 映射。
 
 LangGraph Checkpoint 使用独立数据库，不属于这份 ``Base.metadata``，因此
 业务表建表或迁移不会碰到工作流检查点。
@@ -271,6 +271,31 @@ class AgentMessage(Base):
     created_at: Mapped[datetime] = mapped_column(PORTABLE_DATETIME, nullable=False, server_default=func.now())
 
 
+class AgentSessionMemory(Base):
+    __tablename__ = "agent_session_memories"
+    __table_args__ = MYSQL_TABLE_OPTIONS
+
+    session_id: Mapped[int] = mapped_column(
+        ForeignKey("agent_sessions.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    summary: Mapped[str] = mapped_column(LONG_TEXT, nullable=False, default="")
+    working_state: Mapped[Any] = mapped_column(JSON, nullable=False, default=dict)
+    last_processed_message_id: Mapped[int | None] = mapped_column(Integer)
+    last_memory_message_id: Mapped[int | None] = mapped_column(Integer)
+    version: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        PORTABLE_DATETIME,
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
 class AgentTask(Base):
     __tablename__ = "agent_tasks"
     __table_args__ = (
@@ -333,6 +358,64 @@ class UserPreference(Base):
     preferred_genres: Mapped[Any] = mapped_column(JSON, nullable=False, default=list)
     feedback: Mapped[Any] = mapped_column(JSON, nullable=False, default=list)
     updated_at: Mapped[datetime] = mapped_column(PORTABLE_DATETIME, nullable=False, server_default=func.now())
+
+
+class UserMemoryFact(Base):
+    __tablename__ = "user_memory_facts"
+    __table_args__ = (
+        UniqueConstraint("user_id", "memory_hash"),
+        Index(
+            "ix_user_memory_facts_user_status_last_seen",
+            "user_id",
+            "status",
+            "last_seen_at",
+        ),
+        Index("ix_user_memory_facts_source_session_id", "source_session_id"),
+        MYSQL_TABLE_OPTIONS,
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    memory_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    memory_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    memory_value: Mapped[Any] = mapped_column(JSON, nullable=False)
+    normalized_value: Mapped[str] = mapped_column(String(191), nullable=False)
+    memory_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    polarity: Mapped[str] = mapped_column(String(16), nullable=False, default="neutral")
+    strength: Mapped[str] = mapped_column(String(16), nullable=False, default="soft")
+    confidence: Mapped[float] = mapped_column(PRECISE_FLOAT, nullable=False, default=0.5)
+    source_type: Mapped[str] = mapped_column(String(16), nullable=False, default="explicit")
+    source_session_id: Mapped[int | None] = mapped_column(
+        ForeignKey("agent_sessions.id", ondelete="SET NULL")
+    )
+    source_message_id: Mapped[int | None] = mapped_column(Integer)
+    occurrence_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=1,
+        server_default="1",
+    )
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="active")
+    first_seen_at: Mapped[datetime] = mapped_column(
+        PORTABLE_DATETIME,
+        nullable=False,
+        server_default=func.now(),
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        PORTABLE_DATETIME,
+        nullable=False,
+        server_default=func.now(),
+    )
+    expires_at: Mapped[datetime | None] = mapped_column(PORTABLE_DATETIME)
+    version: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
 
 
 # ===== RAG：索引文档、活动集合、集合元数据和评估记录 =====

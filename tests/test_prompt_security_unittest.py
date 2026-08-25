@@ -186,6 +186,7 @@ class PromptSecurityTest(unittest.TestCase):
                     "sentiment": {"positive": 1, "total": 1},
                     "topics": ["成长"],
                     "comments": [],
+                    "match_tags": ["匹配：治愈", "口碑"],
                 }
             ],
             "evidence_map": {1: []},
@@ -217,6 +218,10 @@ class PromptSecurityTest(unittest.TestCase):
         updates = payload["result"]["preference_updates"]
         self.assertEqual(updates["applied"], {})
         self.assertEqual(updates["suggested"], {})
+        self.assertEqual(
+            payload["result"]["recommendations"][0]["match_tags"],
+            ["匹配：治愈", "口碑"],
+        )
         self.assertEqual(
             payload["result"]["prompt_trace"]["security"]
             ["preference_suggestions"]["filtered_count"],

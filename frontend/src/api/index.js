@@ -243,6 +243,18 @@ export function deleteAgentSession(sessionId) {
   return api.delete(`/agent/sessions/${sessionId}`)
 }
 
+export function getAgentMemories() {
+  return api.get('/agent/memories')
+}
+
+export function updateAgentMemory(memoryId, updates) {
+  return api.patch(`/agent/memories/${memoryId}`, updates)
+}
+
+export function deleteAgentMemory(memoryId) {
+  return api.delete(`/agent/memories/${memoryId}`)
+}
+
 export function getWatchGuides(page = 1, page_size = 50) {
   return api.get('/agent/watch-guides', { params: { page, page_size } })
 }

@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 try:
     from pydantic import BaseModel, Field
@@ -149,12 +149,52 @@ class LLMRecommendationResponse(BaseModel):
 class RecommendationTurnDecision(BaseModel):
     """Bounded action selected before any recommendation retrieval is allowed."""
 
-    action: str = Field(
+    action: Literal["chat", "recommendation", "followup", "add_watch_guide"] = Field(
         default="chat",
-        description="chat, recommendation, followup, or preference_answer",
+        description="Exactly one bounded action for the current recommendation turn",
     )
     reason: str = ""
     matched_signals: list[str] = Field(default_factory=list)
+    target_anime_name: str = ""
+    resume_preference: bool = False
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+
+
+class SessionMemorySummary(BaseModel):
+    """Structured, session-scoped summary generated from complete messages."""
+
+    summary: str = ""
+    current_goal: str = ""
+    temporary_preferences: dict[str, list[str]] = Field(default_factory=dict)
+    current_constraints: list[str] = Field(default_factory=list)
+    referenced_anime: list[str] = Field(default_factory=list)
+    unresolved_questions: list[str] = Field(default_factory=list)
+
+
+class LongTermMemoryProposal(BaseModel):
+    """A model proposal; local validation decides whether it may be persisted."""
+
+    action: Literal["remember", "forget"] = "remember"
+    source_message_id: int = 0
+    memory_type: Literal[
+        "genre_preference",
+        "mood_preference",
+        "content_dislike",
+        "pacing_preference",
+        "studio_preference",
+        "viewing_habit",
+        "recommendation_feedback",
+    ]
+    memory_key: str = ""
+    value: str = ""
+    polarity: Literal["positive", "negative", "neutral"] = "neutral"
+    strength: Literal["soft", "hard"] = "soft"
+    explicit: bool = False
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+
+
+class LongTermMemoryExtraction(BaseModel):
+    memories: list[LongTermMemoryProposal] = Field(default_factory=list)
 
 
 class RecommendationResponseSchema(BaseModel):

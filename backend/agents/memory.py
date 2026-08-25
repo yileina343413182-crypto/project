@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import date, datetime, timedelta
 from typing import Any
 
@@ -16,7 +17,18 @@ from sqlalchemy.dialects.mysql import insert as mysql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from backend.database import orm_session
-from backend.db.models import AgentAttachment, AgentMessage, AgentSession, AgentTask, User, UserAnimeStatus, UserPreference, WatchGuide
+from backend.db.models import (
+    AgentAttachment,
+    AgentMessage,
+    AgentSession,
+    AgentSessionMemory,
+    AgentTask,
+    User,
+    UserAnimeStatus,
+    UserMemoryFact,
+    UserPreference,
+    WatchGuide,
+)
 from backend.db.session import get_sync_engine
 
 
@@ -51,8 +63,10 @@ def init_agent_tables(db_path=None):
             AgentSession.__table__,
             AgentAttachment.__table__,
             AgentMessage.__table__,
+            AgentSessionMemory.__table__,
             AgentTask.__table__,
             UserPreference.__table__,
+            UserMemoryFact.__table__,
             WatchGuide.__table__,
             UserAnimeStatus.__table__,
         ],
@@ -660,9 +674,36 @@ def get_user_preferences(user_id: int) -> dict[str, Any]:
         return _preference_dict(record)
 
 
+def _normalized_preference(value: Any) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip(" \t\r\n，。；;、")
+    return text.casefold()
+
+
 def update_user_preferences(user_id: int, updates: dict[str, Any]) -> dict[str, Any]:
-    """只合并白名单偏好字段，去重后返回最新完整偏好。"""
+    """合并白名单偏好字段；本轮负向值优先，并移除相反投影。"""
     allowed = ("likes", "dislikes", "preferred_moods", "preferred_genres", "feedback")
+    positive_fields = ("likes", "preferred_moods", "preferred_genres")
+    prepared: dict[str, list[Any]] = {}
+    for key in allowed:
+        values = updates.get(key)
+        if values is None:
+            continue
+        values = values if isinstance(values, list) else [values]
+        prepared[key] = [
+            value.strip() if isinstance(value, str) else value
+            for value in values
+            if value and _normalized_preference(value)
+        ]
+    negative_values = {
+        _normalized_preference(value)
+        for value in prepared.get("dislikes", [])
+    }
+    positive_values = {
+        _normalized_preference(value)
+        for key in positive_fields
+        for value in prepared.get(key, [])
+        if _normalized_preference(value) not in negative_values
+    }
     with orm_session() as session:
         _ensure_preferences(session, user_id)
         record = session.scalar(
@@ -671,19 +712,36 @@ def update_user_preferences(user_id: int, updates: dict[str, Any]) -> dict[str, 
             .with_for_update()
         )
         current = _preference_dict(record)
+        if negative_values:
+            for key in positive_fields:
+                current[key] = [
+                    value
+                    for value in current[key]
+                    if _normalized_preference(value) not in negative_values
+                ]
+        if positive_values:
+            current["dislikes"] = [
+                value
+                for value in current["dislikes"]
+                if _normalized_preference(value) not in positive_values
+            ]
         for key in allowed:
-            values = updates.get(key)
+            values = prepared.get(key)
             if values is None:
                 continue
-            if not isinstance(values, list):
-                values = [values]
             merged = list(current[key])
             for value in values:
-                if isinstance(value, str):
-                    value = value.strip()
-                if value and value not in merged:
+                normalized = _normalized_preference(value)
+                if key in positive_fields and normalized in negative_values:
+                    continue
+                if normalized and all(
+                    _normalized_preference(existing) != normalized
+                    for existing in merged
+                ):
                     merged.append(value)
             current[key] = merged[-(30 if key == "feedback" else 20):]
+            setattr(record, key, current[key])
+        for key in allowed:
             setattr(record, key, current[key])
         record.updated_at = datetime.now()
         return current

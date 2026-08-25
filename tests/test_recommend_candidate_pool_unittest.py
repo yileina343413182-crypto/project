@@ -159,7 +159,7 @@ class RecommendationCandidatePoolTest(unittest.TestCase):
         )
 
         self.assertEqual(pool[0]["id"], 3)
-        self.assertTrue(all(item["preference_bonus"] <= 0.32 for item in pool))
+        self.assertTrue(all(item["preference_bonus"] <= 0.15 for item in pool))
 
 
 if __name__ == "__main__":

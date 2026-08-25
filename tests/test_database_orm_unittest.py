@@ -23,6 +23,7 @@ from backend.db.models import (
     AgentMessage,
     AgentAttachment,
     AgentSession,
+    AgentSessionMemory,
     AgentTask,
     BUSINESS_TABLES,
     Base,
@@ -30,6 +31,7 @@ from backend.db.models import (
     Topic,
     User,
     UserAnimeStatus,
+    UserMemoryFact,
     WatchGuide,
 )
 from backend.db.session import get_async_engine, get_async_sessionmaker, get_sync_engine
@@ -49,13 +51,15 @@ class DatabaseOrmTest(unittest.TestCase):
         self.engine.dispose()
         self.path.unlink(missing_ok=True)
 
-    def test_schema_contains_exactly_19_business_tables(self):
+    def test_schema_contains_exactly_21_business_tables(self):
         tables = set(inspect(self.engine).get_table_names())
         self.assertEqual(tables, set(BUSINESS_TABLES))
-        self.assertEqual(len(tables), 19)
+        self.assertEqual(len(tables), 21)
         self.assertIn("agent_attachments", tables)
         self.assertIn("watch_guides", tables)
         self.assertIn("user_anime_statuses", tables)
+        self.assertIn("agent_session_memories", tables)
+        self.assertIn("user_memory_facts", tables)
         self.assertNotIn("checkpoints", tables)
         self.assertNotIn("writes", tables)
 
@@ -485,6 +489,36 @@ class DatabaseOrmTest(unittest.TestCase):
                 migration.op = Operations(context)
                 migration.upgrade()
                 self.assertTrue(inspect(connection).has_table(AgentAttachment.__tablename__))
+                migration.upgrade()
+        finally:
+            engine.dispose()
+
+    def test_context_memory_revision_adds_only_the_missing_tables(self):
+        migration_path = (
+            Path(__file__).resolve().parents[1]
+            / "alembic"
+            / "versions"
+            / "20260824_08_add_context_memories.py"
+        )
+        spec = importlib.util.spec_from_file_location("context_memory_migration", migration_path)
+        migration = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(migration)
+        engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
+        try:
+            with engine.begin() as connection:
+                Base.metadata.create_all(
+                    connection,
+                    tables=[User.__table__, AgentSession.__table__],
+                )
+                context = MigrationContext.configure(connection)
+                migration.op = Operations(context)
+                migration.upgrade()
+                self.assertTrue(
+                    inspect(connection).has_table(AgentSessionMemory.__tablename__)
+                )
+                self.assertTrue(
+                    inspect(connection).has_table(UserMemoryFact.__tablename__)
+                )
                 migration.upgrade()
         finally:
             engine.dispose()

@@ -50,7 +50,3 @@ celerybeat-schedule.*
 .vscode/
 .DS_Store
 Thumbs.db
-
-# Local personal document
-/胡斌的简历.pdf
-

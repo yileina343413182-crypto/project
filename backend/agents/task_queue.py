@@ -70,6 +70,28 @@ def _enqueue_agent_task(
     return True
 
 
+def _maintain_recommendation_memory(task: dict, result: dict) -> dict | None:
+    if task.get("agent_type") != "recommendation":
+        return None
+    task_id = int(task["id"])
+    input_data = task.get("input") or {}
+    try:
+        from backend.agents.context_memory import maintain_context_memory
+
+        return maintain_context_memory(
+            int(task["user_id"]),
+            int(task["session_id"]),
+            input_data.get("user_message_id"),
+            result,
+        )
+    except Exception:
+        logger.exception(
+            "Recommendation memory maintenance failed for task %s",
+            task_id,
+        )
+        return None
+
+
 def _dispatch_agent_task(task: dict) -> dict:
     """只按持久化 agent_type/input 白名单分发，不反序列化任意可调用对象。"""
     task_id = int(task["id"])
@@ -93,7 +115,7 @@ def _dispatch_agent_task(task: dict) -> dict:
     if agent_type == "recommendation":
         history = input_data.get("history") or []
         watch_turn = input_data.get("watch_guide_turn") or {}
-        return agent_api._run_recommendation_task(
+        result = agent_api._run_recommendation_task(
             task_id,
             int(task["user_id"]),
             session_id,
@@ -107,6 +129,8 @@ def _dispatch_agent_task(task: dict) -> dict:
             bool(input_data.get("initial_turn")),
             stream=stream,
         )
+        _maintain_recommendation_memory(task, result)
+        return result
     raise ValueError(f"unsupported agent type: {agent_type}")
 
 
@@ -168,12 +192,19 @@ def execute_agent_task(self, task_id: int) -> dict:
 
     existing_message = get_agent_message_by_task_id(task_id)
     if existing_message is not None:
-        payload = _restore_terminal_from_message(task_id, existing_message)
-        AgentStreamEmitter(task_id, task.get("attempt_count") or 1).emit(
-            "task_completed",
-            status="succeeded",
-        )
-        return payload
+        stream = AgentStreamEmitter(task_id, task.get("attempt_count") or 1)
+        stopped, heartbeat_thread = _start_heartbeat(task_id, worker_id)
+        try:
+            payload = existing_message.get("metadata") or {}
+            _maintain_recommendation_memory(task, payload)
+            payload = _restore_terminal_from_message(task_id, existing_message)
+            if task.get("agent_type") == "recommendation":
+                stream.emit("result_ready", status="succeeded")
+            stream.emit("task_completed", status="succeeded")
+            return payload
+        finally:
+            stopped.set()
+            heartbeat_thread.join(timeout=1)
 
     stream = AgentStreamEmitter(task_id, task.get("attempt_count") or 1)
     stream.emit(
@@ -195,6 +226,8 @@ def execute_agent_task(self, task_id: int) -> dict:
                 mark_task_succeeded(task_id, result)
             terminal = get_agent_task_by_id(task_id) or {}
         final_status = terminal.get("status") or "succeeded"
+        if final_status == "succeeded" and task.get("agent_type") == "recommendation":
+            stream.emit("result_ready", status=final_status)
         stream.emit(
             "task_failed" if final_status == "failed" else "task_completed",
             status=final_status,

@@ -59,6 +59,7 @@ from backend.config import (
     RECOMMEND_LLM_REPAIR_RETRIES,
     RECOMMEND_LLM_TIMEOUT,
     RECOMMEND_EVIDENCE_CANDIDATES,
+    RECOMMEND_PROMPT_MAX_TOKENS,
     RECOMMEND_REDIS_MAX_CONNECTIONS,
     RECOMMEND_TOOL_MAX_ROUNDS,
 )
@@ -76,7 +77,9 @@ class AgentState(TypedDict, total=False):
     force_recommendation: bool
     safe_query: str
     search_query: str
+    candidate_query: str
     history: list[dict]
+    memory_context: dict[str, Any]
     input_security: dict[str, Any]
     evidence_security: dict[str, Any]
     preferences: dict[str, Any]
@@ -123,6 +126,8 @@ GENRE_TERMS = (
     "科幻", "机甲", "恋爱", "校园", "悬疑", "推理", "奇幻", "冒险", "日常",
     "喜剧", "战斗", "音乐", "运动", "历史", "职场", "群像", "公路", "魔法",
 )
+_TEMPORARY_PREFERENCE_MARKERS = ("这次", "今天", "最近", "现在", "本轮", "暂时", "今晚")
+_STABLE_PREFERENCE_MARKERS = ("记住", "一直", "平时", "通常", "以后", "总是", "长期")
 MOOD_TERMS = (
     "轻松", "治愈", "热血", "压抑", "温馨", "搞笑", "紧张", "黑暗",
     "浪漫", "感动", "刺激", "平静", "烧脑", "沉重", "爽快", "温柔",
@@ -317,6 +322,26 @@ def _search_query(query: str, preferences: dict) -> str:
     return str(query or "").strip()
 
 
+def _candidate_search_query(query: str, memory_context: dict | None) -> str:
+    """Add only session-scoped goals to retrieval; durable preferences stay separate."""
+    working = (memory_context or {}).get("working_state") or {}
+    terms = []
+    goal = str(working.get("current_goal") or "").strip()
+    if goal:
+        terms.append(goal)
+    for values in (working.get("temporary_preferences") or {}).values():
+        for value in values if isinstance(values, list) else [values]:
+            text = str(value or "").strip()
+            if text:
+                terms.append(text)
+    for value in working.get("current_constraints") or []:
+        text = str(value or "").strip()
+        if text:
+            terms.append(text)
+    unique = list(dict.fromkeys(terms))[:12]
+    return " ".join([str(query or "").strip(), *unique]).strip()
+
+
 def _eligible_candidates(state: AgentState) -> list[dict]:
     """实际图状态使用 eligible；兼容旧检查点和直接调用的单元测试。"""
     if "eligible_candidates" in state:
@@ -398,6 +423,10 @@ def collect_preferences(state: AgentState) -> dict:
     query = state.get("safe_query") or state["query"]
     high_risk = state.get("input_security", {}).get("risk") == "high"
     pending = _pending_slot(state.get("history", []))
+    persistent_scope = not (
+        any(marker in query for marker in _TEMPORARY_PREFERENCE_MARKERS)
+        and not any(marker in query for marker in _STABLE_PREFERENCE_MARKERS)
+    )
     skipped = (
         set()
         if high_risk
@@ -405,16 +434,24 @@ def collect_preferences(state: AgentState) -> dict:
     )
     updates: dict[str, list[Any]] = {}
 
-    genres = [] if high_risk else [term for term in GENRE_TERMS if term in query]
-    moods = [] if high_risk else [term for term in MOOD_TERMS if term in query]
-    dislikes = [] if high_risk else _extract_dislikes(query)
+    genres = (
+        [term for term in GENRE_TERMS if term in query]
+        if not high_risk and persistent_scope
+        else []
+    )
+    moods = (
+        [term for term in MOOD_TERMS if term in query]
+        if not high_risk and persistent_scope
+        else []
+    )
+    dislikes = _extract_dislikes(query) if not high_risk and persistent_scope else []
     if genres:
         updates["preferred_genres"] = genres
     if moods:
         updates["preferred_moods"] = moods
     if dislikes:
         updates["dislikes"] = dislikes
-    if pending and not high_risk:
+    if pending and not high_risk and persistent_scope:
         values = _extract_slot(pending, query)
         if values:
             updates[pending] = _unique(updates.get(pending, []) + values)
@@ -425,6 +462,8 @@ def collect_preferences(state: AgentState) -> dict:
         if high_risk
         else ("skipped", "no new preference values")
     )
+    if not high_risk and not persistent_scope:
+        status, detail = "skipped", "temporary preference remains session-scoped"
     if updates:
         try:
             preferences = update_user_preferences(state["user_id"], updates)
@@ -437,6 +476,10 @@ def collect_preferences(state: AgentState) -> dict:
         "preference_updates": updates,
         "skipped_slots": sorted(skipped),
         "search_query": _search_query(query, preferences),
+        "candidate_query": _candidate_search_query(
+            query,
+            state.get("memory_context", {}),
+        ),
         "agent_steps": [plain_step("collect_preferences", status, detail)],
     }
 
@@ -492,7 +535,7 @@ def build_candidates(state: AgentState) -> dict:
     candidates, step = timed_step(
         "search_anime_candidates",
         build_candidate_pool,
-        state.get("safe_query") or state["query"],
+        state.get("candidate_query") or state.get("safe_query") or state["query"],
         state["user_id"],
         RECOMMEND_CANDIDATE_LIMIT,
         excluded_anime_ids=state.get("excluded_anime_ids", []),
@@ -509,7 +552,7 @@ def retrieve_evidence(state: AgentState) -> dict:
     candidates = state.get("candidates", [])
     try:
         evidence_map, diagnostics = retrieve_candidate_evidence(
-            state.get("search_query") or state["query"],
+            state.get("candidate_query") or state.get("search_query") or state["query"],
             candidates,
             state.get("preferences", {}),
         )
@@ -659,7 +702,7 @@ def pack_context(state: AgentState) -> dict:
     packed, budget = pack_recommendation_context(
         _eligible_candidates(state),
         state.get("evidence_map", {}),
-        state.get("search_query") or state["query"],
+        state.get("candidate_query") or state.get("search_query") or state["query"],
     )
     prompt_template = get_prompt("recommendation")
     trace = prompt_trace(
@@ -680,6 +723,7 @@ def pack_context(state: AgentState) -> dict:
         packed,
         state.get("history", []),
         prompt_template=prompt_template,
+        memory_context=state.get("memory_context", {}),
     )
     budget.update(request_budget)
     return {
@@ -868,25 +912,38 @@ def generate(state: AgentState) -> dict:
 
     started = time.perf_counter()
     try:
+        from backend.agents.recommend_agent import _estimate_prompt_tokens
+
         tool_messages = [
             message
             for message in state.get("messages", [])
             if isinstance(message, ToolMessage)
         ][-8:]
-        tool_context = "\n".join(
-            f"{message.name or 'tool'}: {str(message.content)[:1200]}"
-            for message in tool_messages
-        )
         prompt = state["prompt"]
-        if tool_context:
-            prompt += "\n\nAdditional read-only tool evidence:\n" + tool_context
+        budget = dict(state.get("context_budget", {}))
+        tool_blocks = []
+        skipped_tool_blocks = 0
+        fixed_tokens = int(budget.get("system_tokens", 0)) + int(budget.get("schema_tokens", 0))
+        for message in tool_messages:
+            block = f"{message.name or 'tool'}: {str(message.content)}"
+            candidate_context = "\n".join([*tool_blocks, block])
+            candidate_prompt = prompt + "\n\nAdditional read-only tool evidence:\n" + candidate_context
+            if fixed_tokens + _estimate_prompt_tokens(candidate_prompt) <= RECOMMEND_PROMPT_MAX_TOKENS:
+                tool_blocks.append(block)
+            else:
+                skipped_tool_blocks += 1
+        if tool_blocks:
+            prompt += "\n\nAdditional read-only tool evidence:\n" + "\n".join(tool_blocks)
+        budget["tool_context_blocks"] = len(tool_blocks)
+        budget["skipped_tool_context_blocks"] = skipped_tool_blocks
+        budget["estimated_input_tokens"] = fixed_tokens + _estimate_prompt_tokens(prompt)
+        budget["budget_exceeded"] = budget["estimated_input_tokens"] > RECOMMEND_PROMPT_MAX_TOKENS
         trace = state.get("prompt_trace", {})
         prompt_template = get_prompt(
             "recommendation",
             version=trace.get("template_version"),
         )
         data = structured(model, prompt, prompt_template)
-        budget = dict(state.get("context_budget", {}))
         budget["llm_elapsed_ms"] = int((time.perf_counter() - started) * 1000)
         return {
             "llm_data": data,
@@ -1082,6 +1139,10 @@ def finalize_success(state: AgentState) -> dict:
                 "name": candidate.get("name", ""),
                 "platform": verified_platform_availability(items),
                 "comment_count": candidate.get("comment_count", 0),
+                "match_tags": (
+                    list(candidate.get("match_tags") or [])
+                    or list(recommendation.get("match_tags") or [])
+                ),
                 "evidence": {
                     "sentiment": candidate.get("sentiment", {}),
                     "topics": candidate.get("topics", []),
@@ -1310,6 +1371,7 @@ def run_recommendation_graph(
     task_id: int | None = None,
     excluded_anime_ids: list[int] | None = None,
     force_recommendation: bool = False,
+    memory_context: dict | None = None,
     graph=None,
     auto_resume: bool = True,
 ) -> dict:
@@ -1330,6 +1392,7 @@ def run_recommendation_graph(
         "excluded_anime_ids": list(excluded_anime_ids or []),
         "force_recommendation": bool(force_recommendation),
         "history": history or [],
+        "memory_context": memory_context or {},
         "messages": [],
         "agent_steps": [],
         "repair_attempts": 0,

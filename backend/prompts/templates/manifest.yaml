@@ -25,18 +25,31 @@ prompts:
       rag-v6-bounded-reasons: 47971d428b9a1c8233938aef22acb0bd3a317a17a3d51320416396966e7011d8
       rag-v7-tool-bounded: 5f9f93b578687b5fd8a98357c6344221bce7ec5ffbcb6613b2bb5aefc6886993
       rag-v8-soft-reason-length: 615bd46c11e3865fb99de1dc92ef5a55a0d515e3ffaadf4e00b44a0015308865
+      rag-v9-context-memory: 6b62034ebb2e9b0072f50f0b26b50bd6f6d81d04244b230fadfb8b38ca487db1
   recommendation_chat:
     versions:
       v1: f3c93110a73182f7f0dcbafa64ccfb8166021961162f26ce77eaab1915b0d5b4
+      v2-context-memory: 19e1b4f3369282c12d311ec5c9450d7b3a5dfdc75525d3e8c5454c36382f55b1
   recommendation_followup:
     versions:
       v1: 14ef8de50bf589093a98d8678c780015d9357a05570792cde69e2490f04e62d4
+      v2-context-memory: 65a45d63a18543ac8436dae0bd381123434fc51b008e06638183da554ee2021b
   recommendation_image:
     versions:
       v1: dc96c615dc22ab59a7cb7f50ab6f3a2a214318fba2a3f13d8fa032eedd8882f7
   recommendation_intent:
     versions:
       v1: 55fd14495a37b15aa4be47050f5e67f9034cdde80683d33bfceb550324b9980f
+  recommendation_router:
+    versions:
+      v1: b5269f94e69c0e7e009e6a2c1aa14cbb809a7030f4016f251f481d09214ea736
+      v2-context-memory: 8e0228a3f80e1a8158a69fe7c577ed0e14592dd99061130c289cda97e7c3b718
+  recommendation_memory_extract:
+    versions:
+      v1: fe83dab37d8f04463472c916638ea7c101b5c9b8f8afcb12b7610e3452388676
+  recommendation_memory_summary:
+    versions:
+      v1: 1f1e46c40801145210cc921d0b2efb280deb0e57eb7f21e634c1ce782f969c64
   watch_guide:
     versions:
       v1: bad3f184a2888f8fc107c4a09603aca4ba422d89b42c5bd84440f8088ff81ce1

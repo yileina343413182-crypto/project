@@ -36,7 +36,7 @@ class PromptRegistryTest(unittest.TestCase):
             prompt.version,
             active_versions["recommendation"],
         )
-        self.assertEqual(prompt.version, "rag-v8-soft-reason-length")
+        self.assertEqual(prompt.version, "rag-v9-context-memory")
         self.assertEqual(len(prompt.template_hash), 64)
 
     def test_historical_prompt_version_remains_addressable(self):
@@ -68,6 +68,9 @@ class PromptRegistryTest(unittest.TestCase):
             "watch_guide",
             "evidence_answering",
             "recommendation_intent",
+            "recommendation_router",
+            "recommendation_memory_extract",
+            "recommendation_memory_summary",
             "anime_description_search",
             "anime_description_knowledge",
             "anime_comment_summary",

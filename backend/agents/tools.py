@@ -386,7 +386,7 @@ def build_candidate_pool(
             if _matches_term(term, searchable_fields)
         ]
         intent_match_score = min(1.4, len(matched_intent_terms) * 0.28)
-        preference_bonus = min(0.32, len(matched_preference_terms) * 0.08)
+        preference_bonus = min(0.15, len(matched_preference_terms) * 0.05)
         penalty = min(1.2, len(matched_dislike_terms) * 0.45)
         match_score = title_match_score + intent_match_score + preference_bonus
         sentiment_score = positive_rate * 0.35 if total else 0.05

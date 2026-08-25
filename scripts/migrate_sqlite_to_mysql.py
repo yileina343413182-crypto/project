@@ -197,7 +197,7 @@ def migrate_business_tables(source: Engine, target: Engine, chunk_size: int = 10
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="迁移 19 张业务表：SQLite -> 空 MySQL schema")
+    parser = argparse.ArgumentParser(description="迁移 21 张业务表：SQLite -> 空 MySQL schema")
     parser.add_argument("--source", default=DB_PATH, help="源 SQLite 文件路径")
     parser.add_argument(
         "--target-url",

@@ -109,6 +109,47 @@ class RecommendationCheckpointerTest(unittest.TestCase):
                 recommend_graph_module._get_recommendation_checkpointer()
 
 
+class RecommendationPreferenceScopeTest(unittest.TestCase):
+    def test_temporary_request_is_not_written_to_long_term_preferences(self):
+        preferences = {
+            "likes": [],
+            "dislikes": [],
+            "preferred_moods": [],
+            "preferred_genres": [],
+            "feedback": [],
+        }
+        with patch.object(
+            recommend_graph_module,
+            "update_user_preferences",
+        ) as update_mock:
+            result = recommend_graph_module.collect_preferences({
+                "user_id": 7,
+                "query": "这次想看轻松的日常番",
+                "safe_query": "这次想看轻松的日常番",
+                "history": [],
+                "preferences": preferences,
+                "input_security": {"risk": "low"},
+                "memory_context": {
+                    "working_state": {
+                        "current_goal": "继续找适合睡前看的动画",
+                        "temporary_preferences": {"moods": ["轻松"]},
+                        "current_constraints": ["本次不要沉重题材"],
+                    },
+                    "long_term_memories": [
+                        {"type": "genre_preference", "value": "战斗"}
+                    ],
+                },
+            })
+
+        update_mock.assert_not_called()
+        self.assertEqual(result["preference_updates"], {})
+        self.assertEqual(result["preferences"], preferences)
+        self.assertEqual(result["search_query"], "这次想看轻松的日常番")
+        self.assertIn("适合睡前", result["candidate_query"])
+        self.assertIn("轻松", result["candidate_query"])
+        self.assertNotIn("战斗", result["candidate_query"])
+
+
 class FakePlanningModel:
     def __init__(self, response):
         self.response = response
@@ -604,7 +645,7 @@ class RecommendationGraphTest(unittest.TestCase):
         )
         self.assertEqual(
             payload["result"]["prompt_trace"]["template_version"],
-            "rag-v8-soft-reason-length",
+            "rag-v9-context-memory",
         )
         self.assertEqual(
             len(payload["result"]["prompt_trace"]["template_hash"]),

@@ -10,7 +10,7 @@
 > `backend/prompts/templates/*.yaml` 形式的旧平铺模板。Prompt 的版本、模板哈希和
 > 安全诊断会随 Agent 任务写入 `prompt_trace`。
 >
-> 当前业务持久化已统一到 SQLAlchemy 2.0 的 18 张 ORM 表。生产/本机运行优先
+> 当前业务持久化已统一到 SQLAlchemy 2.0 的 21 张 ORM 表。生产/本机运行优先
 > 使用 MySQL；SQLite 保留为迁移源、测试隔离数据库和未配置 MySQL 时的兼容后端。
 > Agent 后台任务由 Redis + Celery Worker 执行，推荐图 Checkpoint 生产环境使用 Redis。
 
@@ -25,6 +25,7 @@ Agent 系统。前端统一从“智能体中心”进入，FastAPI 负责任务
 | **推荐 Agent 2.0** | LangGraph `StateGraph` 编排多轮偏好问卷、候选检索、工具调用、证据绑定、结构化校验与降级恢复 |
 | **舆情诊断 Agent** | 聚合情感分布、主题与代表评论，输出带证据链、执行步骤和 Prompt Trace 的结构化报告 |
 | **推荐后续追问** | 推荐完成后支持自然语言继续追问；服务端保留会话上下文，同时校验候选与证据边界 |
+| **推荐上下文记忆** | 当前会话使用“最近原文 + 增量摘要”，跨会话使用带来源和置信度的结构化长期记忆；原始消息不会因摘要而删除 |
 | **观看指南** | 可根据推荐结果生成并持久化番剧观看指南，支持当前用户分页查看、读取详情和删除 |
 | **混合 RAG** | Chroma 向量召回 + SQL 关键词召回 + RRF 融合 + 可选 qwen3-rerank，并在索引不可用时降级 |
 | **可靠任务执行** | Redis + Celery 分队列执行，支持幂等请求、会话内串行、跨会话并行、SQL 租约、心跳、崩溃重投递和遗留任务恢复 |
@@ -394,6 +395,9 @@ Agent 生产运行与故障恢复见
 | GET | `/api/agent/watch-guides` | 分页读取当前用户的待看番剧指南摘要 |
 | GET | `/api/agent/watch-guides/<guide_id>` | 读取当前用户的一份完整观看指南 |
 | DELETE | `/api/agent/watch-guides/<guide_id>` | 删除当前用户的一份观看指南 |
+| GET | `/api/agent/memories` | 读取当前用户仍在生效的结构化长期推荐记忆 |
+| PATCH | `/api/agent/memories/<memory_id>` | 修改当前用户的一条长期推荐记忆 |
+| DELETE | `/api/agent/memories/<memory_id>` | 精确遗忘当前用户的一条长期推荐记忆 |
 
 #### RAG 与 PromptOps（`/api/rag`，均需 JWT）
 
@@ -599,12 +603,12 @@ Prompt 版本管理细节见
 `DATABASE_URL` 或 `MYSQL_*` 环境变量构造 MySQL 连接；未配置 MySQL 时才使用
 `data/anime_sentiment.db` 作为 SQLite 兼容后端。
 
-ORM 共包含 19 张业务表：
+ORM 共包含 21 张业务表：
 
 | 分组 | 数据表 | 主要用途 |
 |------|--------|----------|
 | 核心业务 | `users`、`anime`、`comments`、`topics`、`chat_history` | 用户、动漫、评论情感、LDA 主题和传统聊天历史 |
-| Agent | `agent_sessions`、`agent_messages`、`agent_tasks`、`agent_attachments`、`user_preferences`、`watch_guides`、`user_anime_statuses` | Agent 会话、多轮消息、后台任务、推荐图片附件、长期偏好、用户待看指南和观看状态 |
+| Agent | `agent_sessions`、`agent_messages`、`agent_session_memories`、`agent_tasks`、`agent_attachments`、`user_preferences`、`user_memory_facts`、`watch_guides`、`user_anime_statuses` | Agent 会话、多轮消息、会话摘要、后台任务、推荐图片附件、结构化长期记忆、用户待看指南和观看状态 |
 | RAG | `rag_index_jobs`、`rag_documents`、`rag_active_collections`、`rag_collection_metadata` | 索引任务、可检索文档、活动集合和 Embedding 元数据 |
 | RAG 评估 | `rag_eval_cases`、`rag_eval_runs`、`rag_eval_items` | 评估用例、运行记录、指标和证据 |
 
@@ -618,7 +622,7 @@ ORM 共包含 19 张业务表：
 - `agent_tasks.client_request_id` 防止客户端重试重复创建任务，`turn_seq` 保证会话内轮次有序；
   两个唯一索引均允许旧任务保留空值。
 - LangGraph Checkpoint 生产使用 Redis；开发可显式使用 `data/langgraph_checkpoints.db`，
-  两者都不属于上述 19 张业务表。
+  两者都不属于上述 21 张业务表。
 
 MySQL Schema 由 Alembic 管理；SQLite → MySQL 的一次性迁移和全量校验脚本位于
 `scripts/migrate_sqlite_to_mysql.py` 与 `scripts/verify_mysql_migration.py`。
@@ -1136,9 +1140,10 @@ docker compose -f compose.agent.yml up -d
 `POST /api/agent/recommend/start` 和 `POST /api/agent/recommend/message`：
 
 1. **安全检查**：检查当前输入与最近会话历史。
-2. **多级偏好补全**：确定性提取并持久化用户明确回答的偏好。
-3. **候选与证据**：本地排序后检索评论证据，并过滤间接 Prompt 注入。
-4. **可选图片理解**：单图先校验格式、大小和像素并去除 EXIF，再由当前统一的 `LLM_MODEL` 提取受控视觉上下文；无需配置第二个视觉模型。
+2. **上下文记忆**：只有自上次摘要后同时达到 6 条新消息和 4000 字时才更新会话摘要；长期事实经过白名单、安全与幂等校验后持久化。
+3. **多级偏好补全**：确定性提取并持久化用户明确回答的偏好。
+4. **候选与证据**：本地排序后检索评论证据，并过滤间接 Prompt 注入。
+5. **可选图片理解**：单图先校验格式、大小和像素并去除 EXIF，再由当前统一的 `LLM_MODEL` 提取受控视觉上下文；无需配置第二个视觉模型。
 5. **受限工具循环**：模型只能选择当前候选池内的只读工具。
 6. **结构化校验**：候选 ID、证据引用和返回 Schema 必须通过后端校验。
 7. **降级与恢复**：节点异常从 Checkpointer 恢复；超限或模型失败走本地结果。

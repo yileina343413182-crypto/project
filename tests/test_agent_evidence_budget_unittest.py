@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """推荐与舆情 Agent 的证据数量边界测试。"""
 
+import json
 import unittest
 from unittest.mock import patch
 
@@ -9,7 +10,8 @@ from backend.agents.opinion_agent import (
     _render_opinion_prompt,
     build_compact_opinion_context,
 )
-from backend.agents.recommend_agent import _render_bounded_prompt
+from backend.agents.recommend_agent import _estimate_prompt_tokens, _render_bounded_prompt
+from backend.agents.schemas import LLMRecommendationResponse
 from backend.agents.recommend_context import (
     _select_evidence_by_source,
     evidence_field_coverage,
@@ -130,7 +132,7 @@ class AgentEvidenceBudgetTest(unittest.TestCase):
             )
         )
         with patch(
-            "backend.agents.recommend_agent.RECOMMEND_PROMPT_MAX_CHARS",
+            "backend.agents.recommend_agent.RECOMMEND_PROMPT_MAX_TOKENS",
             10000,
         ):
             prompt, _prompt_budget = _render_bounded_prompt(
@@ -148,6 +150,49 @@ class AgentEvidenceBudgetTest(unittest.TestCase):
             ),
             20,
         )
+
+    def test_prompt_budget_keeps_json_and_template_boundaries_intact(self):
+        class SmallPrompt:
+            def render_system(self):
+                return "system"
+
+            def render(self, **values):
+                return (
+                    f"<QUERY>{values['query']}</QUERY>"
+                    f"<PREFERENCES>{values['preferences']}</PREFERENCES>"
+                    f"<MEMORY>{values['memory_context']}</MEMORY>"
+                    f"<CANDIDATES>{values['candidates']}</CANDIDATES>"
+                    f"<HISTORY>{values['history']}</HISTORY>"
+                )
+
+        candidates = [{
+            "anime_id": 1,
+            "name": "测试番剧",
+            "topics": ["成长", "音乐"],
+            "evidence": [
+                {"doc_id": f"doc-{index}", "evidence_excerpt": "完整证据句。" * 30}
+                for index in range(4)
+            ],
+        }]
+        with (
+            patch("backend.agents.recommend_agent.RECOMMEND_PROMPT_MAX_TOKENS", 180),
+            patch.object(LLMRecommendationResponse, "model_json_schema", return_value={}),
+        ):
+            prompt, budget = _render_bounded_prompt(
+                1,
+                "第一句需求。第二句需求。",
+                {"preferred_genres": ["音乐"]},
+                candidates,
+                [],
+                prompt_template=SmallPrompt(),
+            )
+
+        candidates_json = prompt.split("<CANDIDATES>", 1)[1].split("</CANDIDATES>", 1)[0]
+        self.assertIsInstance(json.loads(candidates_json), list)
+        self.assertTrue(prompt.endswith("</HISTORY>"))
+        self.assertLessEqual(_estimate_prompt_tokens(prompt), 180)
+        self.assertFalse(budget["budget_exceeded"])
+        self.assertIn("evidence", budget["trimmed_sections"])
 
     def test_source_quota_prioritizes_relation_and_platform_queries(self):
         items = [

@@ -140,7 +140,10 @@ class ApiSmokeTest(unittest.TestCase):
             for method in item
             if method in {"get", "post", "delete", "put", "patch"}
         ]
-        self.assertEqual(len(operations), 40)
+        self.assertEqual(len(operations), 43)
+        paths = self.client.app.openapi()["paths"]
+        self.assertIn("/api/agent/memories", paths)
+        self.assertIn("/api/agent/memories/{memory_id}", paths)
 
 
 if __name__ == "__main__":

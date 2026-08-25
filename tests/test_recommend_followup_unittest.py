@@ -139,6 +139,10 @@ class RecommendationFollowupTest(unittest.TestCase):
 
         with (
             patch(
+                "backend.api.agent.route_recommendation_turn",
+                return_value={"action": "followup", "reason": "test"},
+            ),
+            patch(
                 "backend.api.agent.run_recommendation_followup",
                 return_value=followup,
             ) as followup_mock,
@@ -162,7 +166,6 @@ class RecommendationFollowupTest(unittest.TestCase):
             "持久化的详细回答",
             payload,
             source_task_id=9,
-            task_outcome="succeeded",
         )
         self.assertEqual(payload["response_mode"], "conversation")
 
@@ -181,6 +184,10 @@ class RecommendationFollowupTest(unittest.TestCase):
         }
 
         with (
+            patch(
+                "backend.api.agent.route_recommendation_turn",
+                return_value={"action": "followup", "reason": "test"},
+            ),
             patch("backend.api.agent.resolve_anime_subject", return_value=external),
             patch("backend.api.agent.run_recommendation_followup", return_value=followup),
             patch("backend.api.agent.should_offer_watch_guide") as offer_mock,
