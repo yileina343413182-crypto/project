@@ -25,7 +25,8 @@ Agent 系统。前端统一从“智能体中心”进入，FastAPI 负责任务
 | **推荐 Agent 2.0** | LangGraph `StateGraph` 编排多轮偏好问卷、候选检索、工具调用、证据绑定、结构化校验与降级恢复 |
 | **舆情诊断 Agent** | 聚合情感分布、主题与代表评论，输出带证据链、执行步骤和 Prompt Trace 的结构化报告 |
 | **推荐后续追问** | 推荐完成后支持自然语言继续追问；服务端保留会话上下文，同时校验候选与证据边界 |
-| **推荐上下文记忆** | 当前会话使用“最近原文 + 增量摘要”，跨会话使用带来源和置信度的结构化长期记忆；原始消息不会因摘要而删除 |
+| **推荐上下文记忆** | 当前会话保留最近 8 条原始消息并增量摘要旧消息，跨会话使用带来源和置信度的结构化长期记忆；支持前端查看、修改和精确遗忘 |
+| **动画库与观看状态** | 推荐页可浏览全部动画并维护未看/在看/已看状态；候选生成只从未看作品中选择 |
 | **观看指南** | 可根据推荐结果生成并持久化番剧观看指南，支持当前用户分页查看、读取详情和删除 |
 | **混合 RAG** | Chroma 向量召回 + SQL 关键词召回 + RRF 融合 + 可选 qwen3-rerank，并在索引不可用时降级 |
 | **可靠任务执行** | Redis + Celery 分队列执行，支持幂等请求、会话内串行、跨会话并行、SQL 租约、心跳、崩溃重投递和遗留任务恢复 |
@@ -80,23 +81,23 @@ Agent 生产运行与故障恢复见
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                    前端层（Vue 3 + ECharts）                  │
-│ 登录/注册 → 动漫列表/看板 → Agent 中心 → RAG 评测              │
+│ 登录/注册 → 动漫列表/看板 → Agent 中心 → 记忆/动画库 → RAG 评测 │
 └─────────────────────────┬───────────────────────────────────┘
                           │ HTTP REST API (JSON)
 ┌─────────────────────────▼───────────────────────────────────┐
 │               后端层（FastAPI + Uvicorn ASGI）                │
 │ auth / data / sentiment / topic / recommend / history / agent / rag │
-└──────┬──────────────┬──────────────┬──────────────┬─────────┘
-       │              │              │              │
-┌──────▼──────┐ ┌─────▼──────┐ ┌────▼────┐ ┌──────▼──────────┐
-│  情感分析   │ │  主题挖掘  │ │ Agent  │ │   Bangumi API   │
-│ TextCNN/BERT│ │  gensim LDA│ │LangGraph│ │  bgm.tv 评分    │
-└─────────────┘ └────────────┘ └─────────┘ └─────────────────┘
-                          │
-┌─────────────────────────▼───────────────────────────────────┐
-│       数据层（SQLAlchemy；MySQL 优先 / SQLite 兼容）           │
-│ 核心业务 5 表 + Agent 5 表 + RAG/评估 7 表                    │
-└─────────────────────────┬───────────────────────────────────┘
+└──────┬──────────────┬──────────────┬────────────────────────┘
+       │              │              │ Redis 投递/事件
+┌──────▼──────┐ ┌─────▼──────┐ ┌────▼────────────────────────┐
+│  情感分析   │ │  主题挖掘  │ │ Celery Worker + LangGraph   │
+│ TextCNN/BERT│ │  gensim LDA│ │ 推荐(2) / 舆情(2) / Beat     │
+└─────────────┘ └────────────┘ └────┬───────────┬─────────────┘
+                                    │           │ LLM/RAG/Bangumi
+┌───────────────────────────────────▼──────┐ ┌──▼──────────────┐
+│ 数据层（SQLAlchemy；MySQL 优先/SQLite兼容）│ │ Redis 8         │
+│ 核心业务 5 表 + Agent 9 表 + RAG/评估 7 表 │ │ Broker/Checkpoint│
+└─────────────────────────┬────────────────┘ └─────────────────┘
                           │ 离线流水线
 ┌─────────────────────────▼───────────────────────────────────┐
 │               数据采集与处理层（离线）                          │
@@ -119,11 +120,11 @@ Agent 生产运行与故障恢复见
 | **数据采集** | B 站评论/弹幕爬取，支持搜索+按季索引；Bangumi 吐槽箱批量采集（Top100）；豆瓣短评采集 | requests + BeautifulSoup + B站公开 API |
 | **数据清洗** | HTML 标签净化、表情符号过滤、URL 去除、纯数字/纯符号过滤、短评过滤（<5字）、去重、jieba 分词、停用词去除 | jieba + pandas + re |
 | **自动标注** | Bangumi 按星级标注（7-10分→正面，5-6分→中性，1-4分→负面）；B 站按 SnowNLP 情感打分阈值标注 | snownlp |
-| **情感分析** | TextCNN 三分类（准确率 59.63%）；BERT 微调三分类（准确率 87.40%）；支持实时单条预测 | PyTorch + HuggingFace Transformers |
+| **情感分析** | TextCNN 三分类（准确率 59.63%）；BERT 微调三分类（验证集准确率 87.40%）；支持实时单条预测 | PyTorch + HuggingFace Transformers |
 | **主题挖掘** | LDA 主题建模（默认 8 个主题），支持困惑度/一致性自动调参；TF-IDF / TextRank 关键词提取 | gensim |
 | **可视化看板** | 情感分布饼图、逐条情感趋势折线图、评论词云、LDA 主题卡片、评论列表（分页+情感过滤） | Vue 3 + ECharts 5 + echarts-wordcloud |
 | **用户系统** | 注册/登录、JWT Token 认证、bcrypt 密码哈希、聊天历史持久化 | PyJWT + bcrypt |
-| **Agent 中心** | 舆情诊断、多轮偏好推荐、跨进程并行、会话/任务持久化、崩溃重投递幂等、执行步骤和证据追踪 | LangGraph + Celery + Redis |
+| **Agent 中心** | 舆情诊断、多轮偏好推荐、跨进程并行、短期/长期记忆管理、动画库观看状态、会话/任务持久化、崩溃重投递幂等、执行步骤和证据追踪 | LangGraph + Celery + Redis |
 | **混合 RAG** | Chroma 向量召回与数据库关键词召回并行执行，RRF 融合后可选百炼 Rerank；索引不可用时降级到实时业务表 | Chroma + SQLAlchemy + qwen3-rerank |
 | **AI 推荐** | 保留传统单轮推荐；Agent 2.0 通过偏好问卷、候选池、受限只读工具和结构化校验生成可追溯推荐 | OpenAI 兼容接口（Qwen / OpenAI / 智谱） |
 | **REST API** | 统一 JSON 格式 `{"code":200,"msg":"...","data":{...}}`，完整的错误码体系 | FastAPI APIRouter |
@@ -150,7 +151,7 @@ Agent 生产运行与故障恢复见
 | PyTorch | 2.11.0 | TextCNN / BERT 训练与推理 |
 | transformers | 4.46.3 | bert-base-chinese 预训练模型 |
 | gensim | 4.4.0 | LDA 主题建模 |
-| SQLAlchemy | 2.0.51 | 18 表统一 ORM、同步/异步事务边界 |
+| SQLAlchemy | 2.0.51 | 21 表统一 ORM、同步/异步事务边界 |
 | MySQL | 8.0+ | 默认业务数据库（PyMySQL + aiomysql） |
 | SQLite | 内置 | 迁移源、测试隔离与兼容回退 |
 | Alembic | 1.18.5 | MySQL Schema 迁移 |
@@ -297,7 +298,7 @@ Agent 生产运行与故障恢复见
 
 **优势**：语义理解能力强，对中文口语化评论效果更好
 
-**准确率**：约 87%（验证集 Macro-F1）
+**验证集准确率（Accuracy）**：87.40%
 
 ### 8.3 模型评估（`models/evaluator.py`）
 
@@ -391,7 +392,13 @@ Agent 生产运行与故障恢复见
 | GET | `/api/agent/attachments/<attachment_id>/content` | 鉴权读取当前用户的图片附件 |
 | DELETE | `/api/agent/attachments/<attachment_id>` | 删除当前用户尚未绑定消息的图片附件 |
 | GET | `/api/agent/tasks/<task_id>` | 查询异步任务状态与结果 |
+| GET | `/api/agent/tasks/<task_id>/events` | 按游标读取任务 NDJSON 增量事件；前端异常时回退到状态轮询 |
 | POST | `/api/agent/opinion/analyze` | 启动舆情诊断 Agent；支持 `client_request_id` 幂等键 |
+| GET | `/api/agent/sessions` | 分页读取当前用户的 Agent 会话及活动任务 |
+| GET | `/api/agent/sessions/<session_id>` | 读取当前用户的一份会话、消息与任务状态 |
+| DELETE | `/api/agent/sessions/<session_id>` | 删除非运行中的当前用户会话及其关联数据 |
+| GET | `/api/agent/anime-library` | 分页读取动画库及当前用户的观看状态 |
+| PUT | `/api/agent/anime-library/<anime_id>` | 将动画标记为未看、在看或已看 |
 | GET | `/api/agent/watch-guides` | 分页读取当前用户的待看番剧指南摘要 |
 | GET | `/api/agent/watch-guides/<guide_id>` | 读取当前用户的一份完整观看指南 |
 | DELETE | `/api/agent/watch-guides/<guide_id>` | 删除当前用户的一份观看指南 |
@@ -485,7 +492,10 @@ AI 推荐响应返回一张结构化"推荐卡片"，展示：
 
 - `AgentCenter.vue`：舆情、推荐和 RAG 评测入口。
 - `OpinionAgentPage.vue`：轮询后台任务并展示舆情报告、执行步骤、Prompt Trace 和证据链。
-- `RecommendationAgentPage.vue`：多轮偏好问卷、偏好记忆、结构化推荐和本地降级状态。
+- `RecommendationAgentPage.vue`：多轮偏好问卷、结构化推荐、任务增量事件和本地降级状态；集成长记忆、动画库与观看指南抽屉。
+- `MemoryDrawer.vue`：查看、修改和精确删除当前用户的结构化长期记忆。
+- `AnimeLibraryDrawer.vue`：浏览动画库并维护未看、在看、已看状态。
+- `WatchGuideDrawer.vue`：分页查看、读取和删除当前用户的观看指南。
 - `RagEvaluationPage.vue`：索引任务、检索调试、证据链和内置评估结果。
 
 ---
@@ -541,7 +551,7 @@ flowchart LR
 - `RECOMMEND_TOOLS` 仅包含当前候选池内的只读查询工具，由
   `bind_tools + ToolNode` 执行。
 - `step_count`、`retry_count`、工具轮次和 `recursion_limit` 共同限制循环。
-- Redis Checkpointer 保存生产图节点状态；开发可降级到独立 SQLite 文件，它们都不属于 MySQL 的 19 张业务表。
+- Redis Checkpointer 保存生产图节点状态；开发可降级到独立 SQLite 文件，它们都不属于 MySQL 的 21 张业务表。
 - 高风险 Prompt 注入输入不触发工具规划，也不能写入持久化偏好。
 - LLM 产生的偏好只作为 `suggested` 返回；只有确定性解析结果可以写入
   `applied` 偏好。
@@ -556,6 +566,12 @@ flowchart LR
   重投递不会生成第二条回答，Worker 启动会恢复遗留任务。
 - Agent 写接口接受可选的 `client_request_id`（1～64 字符）；前端默认发送 UUID，重复请求
   返回原 `task_id`，不会重复创建消息或调用模型。`turn_seq` 记录会话内任务顺序。
+- 每轮输入先由确定性路由识别普通对话、推荐、追问或观看指南动作；单轮正负偏好冲突时
+  负向优先，跨轮则按 `source_message_id` 由最新消息覆盖，事实状态与用户偏好投影在同一事务更新。
+- 会话短期上下文保留最近 8 条原始消息；只有自上次摘要后同时新增至少 6 条消息且正文至少
+  4000 字才更新摘要。长期记忆提取失败时不推进消息游标，后续维护会从旧游标重试。
+- 最终回答先幂等保存，但任务在记忆维护完成前保持 `running`；维护异常采用 best-effort 语义，
+  保留可重试游标后再结束任务。Worker 重投递会复用已有回答并补做维护，不重复生成消息。
 
 ### 13.2 PromptOps 与 LLM 接入
 
@@ -567,9 +583,11 @@ flowchart LR
 | 通义千问（qwen） | qwen3.7-plus | `https://dashscope.aliyuncs.com/compatible-mode/v1` |
 
 **健壮性设计**：
-- LLM API 不可用（网络超时/无 API Key）时自动降级为本地模糊匹配，系统始终可用
+- LLM API 不可用（网络超时/无 API Key）时，推荐生成可降级为本地结果，基础数据查询不依赖 LLM
 - 针对 Qwen3 系列默认开启的 `<think>` 思考链标签，自动剥离后取实际回复内容
 - 进程级内存缓存，避免对同一动漫名重复调用 Bangumi API
+- 推荐 Prompt 以 token 估算管理总预算（默认 `RECOMMEND_PROMPT_MAX_TOKENS=10000`），
+  按完整证据、历史、记忆、候选字段和句子逐级压缩，不对最终 Prompt 做机械字符切片
 - Prompt 存放于 `backend/prompts/templates/<name>/<version>.yaml`
 - `active_versions.yaml` 仅负责选择当前版本，回滚不会覆盖历史模板
 - `manifest.yaml` 保存每个不可变模板的 SHA-256
@@ -686,7 +704,7 @@ project/
 ├── batch_predict.py                # 批量情感预测脚本
 ├── compose.agent.yml               # 本地 Redis 8 持久化与健康检查
 ├── requirements.txt                # Python 依赖列表
-├── alembic/                        # MySQL Schema 迁移（当前 revision 20260814_05）
+├── alembic/                        # MySQL Schema 迁移（当前 revision 20260824_08）
 ├── scripts/                        # SQLite→MySQL 迁移、全量核验和运行探测
 ├── tests/                          # API、ORM、Agent、Prompt 安全和 RAG 回归测试
 │
@@ -708,9 +726,13 @@ project/
 │   │   └── history.py              # POST/GET/DELETE /history/chat（JWT 保护）
 │   ├── agents/
 │   │   ├── recommend_graph.py      # LangGraph StateGraph、节点、边与 Checkpointer
+│   │   ├── recommend_agent.py      # 推荐 Prompt 组装、token 预算与结构化生成
+│   │   ├── recommend_turn_router.py # 推荐、追问、普通对话和指南意图路由
 │   │   ├── recommend_followup.py   # 推荐完成后的多轮追问与结果约束
+│   │   ├── context_memory.py       # 会话摘要、长期记忆提取、冲突消解与投影
 │   │   ├── watch_guide.py          # 观看指南生成、校验与持久化
 │   │   ├── task_queue.py           # Celery 投递、租约、心跳、幂等和恢复
+│   │   ├── stream_events.py        # Redis 任务事件流与状态轮询回退
 │   │   ├── prompt_security.py      # 输入、评论、RAG 和工具结果的安全边界
 │   │   ├── opinion_agent.py        # 结构化舆情诊断 Agent
 │   │   └── tools.py                # Agent 工具注册表
@@ -738,7 +760,7 @@ project/
 │   ├── evaluator.py                # 评估工具（混淆矩阵、Acc/F1/Precision/Recall）
 │   └── saved/
 │       ├── textcnn/                # model.pt（模型权重）+ vocab.pkl（词汇表）
-│       ├── bert/                   # pytorch_model.bin / model.safetensors + config.json
+│       ├── bert/                   # bert_sentiment_model.pt + config/tokenizer 文件
 │       └── reports/                # 训练评估报告（文本格式）
 │
 ├── topic/                          # 主题挖掘
@@ -788,7 +810,7 @@ project/
             ├── CommentList.vue      # 评论列表（分页+过滤）
             ├── RecommendChat.vue    # AI 推荐对话框
             ├── RecommendCard.vue    # 推荐结果卡片
-            └── agent/               # Agent 步骤、偏好、报告、证据和 Prompt Trace 组件
+            └── agent/               # Agent 步骤/证据及记忆、动画库、观看指南抽屉
 ```
 
 ---
@@ -859,9 +881,11 @@ $env:AGENT_MAX_CONCURRENT="4"
 $env:RECOMMEND_AGENT_MAX_CONCURRENT="2"
 $env:OPINION_AGENT_MAX_CONCURRENT="2"
 $env:REDIS_URL="redis://127.0.0.1:6379/0"
+$env:CELERY_BROKER_URL=$env:REDIS_URL
 $env:CELERY_RESULT_BACKEND=$env:REDIS_URL
 $env:AGENT_REDIS_KEY_PREFIX="anime-agent-local"
 $env:RECOMMEND_CHECKPOINT_BACKEND="redis"
+$env:RECOMMEND_PROMPT_MAX_TOKENS="10000"
 ```
 
 未配置 LLM 或 Embedding Key 时，推荐与 RAG 分别降级为本地推荐和数据库
@@ -870,7 +894,7 @@ $env:RECOMMEND_CHECKPOINT_BACKEND="redis"
 
 Agent 并发由推荐/舆情两个 Celery 队列的 Worker concurrency 控制；正式并发运行应使用
 MySQL 和 Redis 8。完整启动、恢复和生产部署说明见
-[`docs/agent-celery-redis.md`](docs/agent-celery-redis.md)；不安装 Docker或unbtun
+[`docs/agent-celery-redis.md`](docs/agent-celery-redis.md)；无法安装 Docker 或使用 Ubuntu 的环境
 可按 [`docs/redis-cloud-free.md`](docs/redis-cloud-free.md) 接入 Redis Cloud Free。
 
 ### 4. 安装前端依赖
@@ -883,8 +907,22 @@ cd ..
 
 ### 5. 启动
 
-```bash
-# 确保 MySQL 已启动且数据库配置有效，然后启动后端（5000 端口）
+推荐 Agent 需要 Redis、两个 Worker 和 Beat。Windows 本地开发按顺序在独立终端启动：
+
+```powershell
+# 1. Redis 8
+docker compose -f compose.agent.yml up -d
+
+# 2. 推荐 Worker（新终端）
+celery -A backend.celery_app:celery_app worker -Q agent.recommendation,agent.control -P threads --concurrency=2 -n recommend-local
+
+# 3. 舆情 Worker（新终端）
+celery -A backend.celery_app:celery_app worker -Q agent.opinion -P threads --concurrency=2 -n opinion-local
+
+# 4. 定时恢复任务（新终端）
+celery -A backend.celery_app:celery_app beat -l info
+
+# 5. FastAPI（新终端，5000 端口）
 python run.py
 ```
 
@@ -895,7 +933,8 @@ cd frontend
 npm run dev
 ```
 
-浏览器访问：http://localhost:3000
+浏览器访问：http://localhost:3000。`run.py` 只启动 FastAPI，并打印上述 Worker 命令，
+不会代替用户启动 Celery。Linux 生产环境可将 Worker 池切换为 `prefork`，详见部署文档。
 
 ### 6. 重建 RAG 向量索引
 
@@ -917,7 +956,7 @@ python rebuild_rag_index.py
 ### 7. 自动化测试
 
 ```powershell
-python -m unittest discover -s tests -p "test*_unittest.py"
+python -m unittest discover -s tests -p "test_*unittest.py"
 ```
 
 ---
@@ -1030,7 +1069,11 @@ python -m topic.lda_model --anime_id 1 --find_best --min_topics 3 --max_topics 1
 | POST | `/api/agent/recommend/start` | 创建推荐 Agent 2.0 会话与任务；支持 `client_request_id` 幂等键 |
 | POST | `/api/agent/recommend/message` | 向推荐会话追加消息；同一会话严格串行 |
 | GET | `/api/agent/tasks/<task_id>` | 查询 Agent 任务状态与结果 |
+| GET | `/api/agent/tasks/<task_id>/events` | 按游标读取任务 NDJSON 增量事件 |
 | GET/DELETE | `/api/agent/sessions[/<session_id>]` | 查询或删除会话；查询含 `active_task`，运行中会话禁止删除 |
+| GET/PATCH/DELETE | `/api/agent/memories[/<memory_id>]` | 查看、修改或精确遗忘当前用户的长期记忆 |
+| GET/PUT | `/api/agent/anime-library[/<anime_id>]` | 查看动画库或更新当前用户观看状态 |
+| GET/DELETE | `/api/agent/watch-guides[/<guide_id>]` | 查看或删除当前用户的观看指南 |
 | POST | `/api/rag/index/rebuild` | 重建全量 RAG 索引 |
 | GET | `/api/rag/index/status` | 查询关系文档、Embedding、Chroma 与 Rerank 状态 |
 | POST | `/api/rag/search` | 调试混合检索、RRF 和证据链 |
@@ -1063,7 +1106,7 @@ python batch_predict.py --model bert --anime_id 1
 # 仅重新计算所有动漫的 LDA 主题
 python prepare_data.py --topics-only
 
-# 核验 SQLite → MySQL 的 18 表全量内容
+# 核验 SQLite → MySQL 的 21 表全量内容
 python scripts/verify_mysql_migration.py
 
 # 重建 RAG 索引
@@ -1076,7 +1119,7 @@ cd frontend && npm run dev
 cd frontend && npm run build
 
 # 完整单元测试（含 API、ORM、Agent、Prompt 安全和 RAG）
-python -m unittest discover -s tests -p "test*_unittest.py"
+python -m unittest discover -s tests -p "test_*unittest.py"
 
 # 启动 Agent 所需的本地 Redis
 docker compose -f compose.agent.yml up -d
@@ -1113,6 +1156,7 @@ docker compose -f compose.agent.yml up -d
 | BERT | 87.40% | bert-base-chinese + 分类头微调 | 语义理解更强，适合实时预测 |
 
 模型权重存放于 `models/saved/`，训练集位于 `data/train/`，训练/评估报告见 `models/saved/reports/`。
+BERT 的 87.40% 为已记录的验证集准确率；部署检查点时应同时保留权重、模型配置和完整 tokenizer 文件。
 
 ---
 
@@ -1127,7 +1171,7 @@ docker compose -f compose.agent.yml up -d
 | 历史记录 | `/history` | 查看/删除与 AI 推荐的聊天历史（需登录） |
 | 智能体中心 | `/agent` | 舆情、推荐和 RAG 评测入口（需登录） |
 | 舆情诊断 | `/agent/opinion` | 结构化报告、执行步骤、Prompt Trace 和证据链（需登录） |
-| 推荐 Agent 2.0 | `/agent/recommendation` | 多轮偏好问卷和可追溯推荐（需登录） |
+| 推荐 Agent 2.0 | `/agent/recommendation` | 多轮偏好问卷、长期记忆管理、动画观看状态、观看指南和可追溯推荐（需登录） |
 | RAG 评测 | `/agent/evaluation` | 索引状态、检索调试和冒烟评估（需登录） |
 
 路由守卫：未登录用户访问受保护路由时自动跳转 `/login`。
@@ -1140,14 +1184,15 @@ docker compose -f compose.agent.yml up -d
 `POST /api/agent/recommend/start` 和 `POST /api/agent/recommend/message`：
 
 1. **安全检查**：检查当前输入与最近会话历史。
-2. **上下文记忆**：只有自上次摘要后同时达到 6 条新消息和 4000 字时才更新会话摘要；长期事实经过白名单、安全与幂等校验后持久化。
+2. **上下文记忆**：保留最近 8 条原始消息；只有自上次摘要后同时达到 6 条新消息和 4000 字时才更新摘要。长期事实经过白名单、安全与幂等校验后持久化，提取失败保留游标供后续重试。
 3. **多级偏好补全**：确定性提取并持久化用户明确回答的偏好。
 4. **候选与证据**：本地排序后检索评论证据，并过滤间接 Prompt 注入。
 5. **可选图片理解**：单图先校验格式、大小和像素并去除 EXIF，再由当前统一的 `LLM_MODEL` 提取受控视觉上下文；无需配置第二个视觉模型。
-5. **受限工具循环**：模型只能选择当前候选池内的只读工具。
-6. **结构化校验**：候选 ID、证据引用和返回 Schema 必须通过后端校验。
-7. **降级与恢复**：节点异常从 Checkpointer 恢复；超限或模型失败走本地结果。
-8. **可追溯结果**：保存 Prompt 版本、模板哈希、证据、执行步骤和安全诊断。
+6. **受限工具循环**：模型只能选择当前候选池内的只读工具。
+7. **结构化校验**：候选 ID、证据引用和返回 Schema 必须通过后端校验。
+8. **记忆维护与终态**：最终回答幂等保存后任务仍为 `running`，完成本轮记忆维护尝试后才写入成功终态并发送完成事件。
+9. **降级与恢复**：节点异常从 Checkpointer 恢复；超限或模型失败走本地结果；重投递复用已有回答。
+10. **可追溯结果**：保存 Prompt 版本、模板哈希、证据、执行步骤和安全诊断。
 
 ---
 
