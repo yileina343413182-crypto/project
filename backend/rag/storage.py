@@ -1,15 +1,18 @@
 # -*- coding: utf-8 -*-
 """RAG 索引任务、文档、活动集合与评估记录的同步持久化层。
 
-索引后台线程使用这里批量写入；检索在 Chroma 无结果时也会查询业务数据库
-中的 ``rag_documents``，因此向量索引损坏不会直接造成证据完全不可用。
+索引后台线程使用这里批量写入；BM25 从 ``rag_documents`` 构建倒排索引，
+因此向量索引损坏不会直接造成证据完全不可用。
 """
 
 from __future__ import annotations
 
 import json
 import re
+from collections import OrderedDict
+from dataclasses import dataclass
 from datetime import date, datetime
+from threading import RLock
 from typing import Any
 
 from sqlalchemy import func, select, update
@@ -27,6 +30,7 @@ from backend.db.models import (
     RagIndexJob,
 )
 from backend.db.session import get_sync_engine
+from backend.rag.bm25 import BM25Index
 
 try:
     import jieba
@@ -34,16 +38,38 @@ except Exception:
     jieba = None
 
 _LOW_INFO_TERMS = {"推荐", "动漫", "动画", "想看", "有没有", "一部", "一些", "什么", "可以", "比较", "喜欢"}
+_BM25_CACHE_MAX_COLLECTIONS = 2
+
+
+@dataclass(frozen=True)
+class _BM25Corpus:
+    rows: tuple[dict, ...]
+    index: BM25Index
+    anime_document_indexes: dict[int, set[int]]
+
+
+_bm25_cache: OrderedDict[str, tuple[tuple, _BM25Corpus]] = OrderedDict()
+_bm25_cache_lock = RLock()
+
+
+def _segmented_terms(text: str) -> list[str]:
+    cleaned = re.sub(r"[^\w\u4e00-\u9fff]+", " ", (text or "").lower())
+    raw = list(jieba.cut(cleaned)) if jieba else cleaned.split()
+    return [
+        term
+        for value in raw
+        if (term := value.strip())
+        and len(term) > 1
+        and term not in _LOW_INFO_TERMS
+        and not term.isdigit()
+    ]
 
 
 def query_terms(query: str) -> list[str]:
     """对查询分词并去重，得到关键词降级检索使用的少量词项。"""
-    cleaned = re.sub(r"[^\w\u4e00-\u9fff]+", " ", (query or "").lower())
-    raw = list(jieba.cut(cleaned)) if jieba else cleaned.split()
     result = []
-    for term in raw:
-        term = term.strip()
-        if len(term) > 1 and term not in _LOW_INFO_TERMS and not term.isdigit() and term not in result:
+    for term in _segmented_terms(query):
+        if term not in result:
             result.append(term)
     return result[:20]
 
@@ -267,6 +293,7 @@ def upsert_documents(collection_name: str, docs: list[dict]) -> None:
                     set_={column: statement.excluded[column] for column in update_columns},
                 )
             )
+    _invalidate_bm25_cache(collection_name)
 
 
 def count_documents(collection_name: str | None = None) -> int:
@@ -320,49 +347,121 @@ def get_anime_documents(
     return result
 
 
-def keyword_search_documents(
+def _invalidate_bm25_cache(collection_name: str | None = None) -> None:
+    """文档事务提交后清除对应的进程内 BM25 缓存。"""
+    with _bm25_cache_lock:
+        if collection_name is None:
+            _bm25_cache.clear()
+        else:
+            _bm25_cache.pop(collection_name, None)
+
+
+def _bm25_collection_signature(collection_name: str) -> tuple:
+    """用低成本数据库统计检测其他进程完成的集合更新。"""
+    with orm_session() as session:
+        count, max_id, latest_update = session.execute(
+            select(
+                func.count(RagDocument.id),
+                func.max(RagDocument.id),
+                func.max(RagDocument.updated_at),
+            ).where(RagDocument.collection_name == collection_name)
+        ).one()
+    return int(count or 0), int(max_id or 0), latest_update
+
+
+def _load_bm25_corpus(collection_name: str, signature: tuple) -> _BM25Corpus:
+    with _bm25_cache_lock:
+        cached = _bm25_cache.get(collection_name)
+        if cached and cached[0] == signature:
+            _bm25_cache.move_to_end(collection_name)
+            return cached[1]
+
+        with orm_session() as session:
+            records = session.execute(
+                select(
+                    RagDocument.doc_id,
+                    RagDocument.source_type,
+                    RagDocument.anime_id,
+                    RagDocument.anime_name,
+                    RagDocument.comment_id,
+                    RagDocument.content,
+                    RagDocument.document_metadata,
+                )
+                .where(RagDocument.collection_name == collection_name)
+                .order_by(RagDocument.id)
+            ).all()
+
+        rows = tuple(
+            {
+                "doc_id": record.doc_id,
+                "source_type": record.source_type,
+                "anime_id": record.anime_id,
+                "anime_name": record.anime_name,
+                "comment_id": record.comment_id,
+                "content": record.content or "",
+                "metadata": _json_value(record.document_metadata, {}),
+            }
+            for record in records
+        )
+        anime_document_indexes: dict[int, set[int]] = {}
+        for document_index, row in enumerate(rows):
+            if row["anime_id"] is not None:
+                anime_document_indexes.setdefault(int(row["anime_id"]), set()).add(document_index)
+        corpus = _BM25Corpus(
+            rows=rows,
+            index=BM25Index([_segmented_terms(row["content"]) for row in rows]),
+            anime_document_indexes=anime_document_indexes,
+        )
+        _bm25_cache[collection_name] = (signature, corpus)
+        _bm25_cache.move_to_end(collection_name)
+        while len(_bm25_cache) > _BM25_CACHE_MAX_COLLECTIONS:
+            _bm25_cache.popitem(last=False)
+        return corpus
+
+
+def bm25_search_documents(
     query: str,
     collection_name: str | None,
     anime_id: int | None = None,
     top_k: int = 6,
 ) -> list[dict]:
-    """在数据库文档中做关键词匹配，作为 Chroma 检索的第一层降级。"""
+    """在活动集合的完整文档语料上执行 Okapi BM25 关键词检索。"""
     collection_name = collection_name or get_active_collection()
-    if not collection_name:
-        return []
-    filters = [RagDocument.collection_name == collection_name]
-    if anime_id is not None:
-        filters.append(RagDocument.anime_id == anime_id)
-    with orm_session() as session:
-        rows = session.scalars(
-            select(RagDocument)
-            .where(*filters)
-            .order_by(RagDocument.updated_at.desc())
-            .limit(2000)
-        ).all()
-
     terms = query_terms(query)
-    query_lower = query.lower()
-    scored = []
-    for row in rows:
-        content = row.content or ""
-        content_lower = content.lower()
-        score = 4 if query_lower and query_lower in content_lower else 0
-        score += sum(1 for term in terms if term and term in content_lower)
-        if not terms and not query_lower:
-            score = 1
-        if score > 0:
-            scored.append((score, row))
-    scored.sort(key=lambda item: (item[0], len(item[1].content or "")), reverse=True)
+    if not collection_name or not terms or top_k <= 0:
+        return []
+
+    signature = _bm25_collection_signature(collection_name)
+    if not signature[0]:
+        return []
+    corpus = _load_bm25_corpus(collection_name, signature)
+    allowed_indexes = (
+        corpus.anime_document_indexes.get(int(anime_id), set())
+        if anime_id is not None
+        else None
+    )
+    scored = corpus.index.rank(
+        terms,
+        top_k=top_k,
+        allowed_document_indexes=allowed_indexes,
+    )
 
     result = []
-    for rank, (score, row) in enumerate(scored[:top_k], start=1):
-        metadata = _json_value(row.document_metadata, {})
+    for rank, (document_index, score) in enumerate(scored, start=1):
+        row = corpus.rows[document_index]
+        metadata = dict(row["metadata"])
+        metadata.setdefault("doc_id", row["doc_id"])
+        metadata.setdefault("anime_id", row["anime_id"])
+        metadata.setdefault("anime_name", row["anime_name"] or "")
+        metadata.setdefault("comment_id", row["comment_id"])
+        metadata.setdefault("source_type", row["source_type"])
         result.append(
             {
-                "content": row.content,
+                "content": row["content"],
+                "full_content": row["content"],
                 "metadata": metadata,
-                "similarity": round(min(0.95, 0.45 + score * 0.08), 4),
+                "similarity": round(score / (score + 1.0), 4),
+                "bm25_score": round(score, 6),
                 "rank": rank,
                 "source_label": _source_label(metadata),
             }

@@ -49,6 +49,7 @@ class RetrievalEvidence(BaseModel):
     source_type: str = ""
     content: str = ""
     similarity: float = 0.0
+    bm25_score: float | None = None
     rrf_score: float = 0.0
     rerank_score: float | None = None
     vector_rank: int | None = None

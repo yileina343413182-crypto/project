@@ -263,7 +263,7 @@ def _comment_documents(anime_id: int, anime_name: str, platform: str, limit: int
 def run_index_job(job_id: int, collection_name: str, anime_id: int | None = None, activate: bool = True) -> dict:
     """完成文档构建、数据库 upsert、向量写入和可选活动集合切换。"""
     update_index_job(job_id, status="running", started_at=time.strftime("%Y-%m-%d %H:%M:%S"), current_step="building_documents", progress=8)
-    # 先写可重建的数据库文档副本，再尝试向量化；向量不可用时仍可关键词检索。
+    # 先写可重建的数据库文档副本，再尝试向量化；向量不可用时仍可构建 BM25。
     docs = build_documents(anime_id=anime_id)
     total = len(docs)
     update_index_job(job_id, total_docs=total, current_step="saving_sqlite_documents", progress=25)
@@ -306,7 +306,7 @@ def run_index_job(job_id: int, collection_name: str, anime_id: int | None = None
     if activate and verified:
         set_active_collection(collection_name)
 
-    mode = "chroma" if verified else "sqlite_keyword_fallback"
+    mode = "chroma" if verified else "bm25_fallback"
     status = "failed" if embedding_client.available and docs and not verified else "succeeded"
     update_index_job(
         job_id,

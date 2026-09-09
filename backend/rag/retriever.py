@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""混合 RAG 检索器：Chroma 优先，数据库关键词与实时业务数据依次降级。"""
+"""混合 RAG 检索器：Chroma 与 BM25 并行，实时业务数据最终降级。"""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from backend.database import get_sentiment_stats, get_topics, orm_session
 from backend.db.models import Anime, Comment
 from backend.rag.embeddings import EMBEDDING_MODEL, EMBEDDING_PROVIDER, EmbeddingClient
 from backend.rag.reranker import BailianReranker
-from backend.rag.storage import get_active_collection, get_collection_metadata, keyword_search_documents, query_terms
+from backend.rag.storage import bm25_search_documents, get_active_collection, get_collection_metadata, query_terms
 from backend.rag.vector_store import ChromaVectorStore
 
 
@@ -40,7 +40,7 @@ def search_evidence(query: str, anime_id: int | None = None, top_k: int = 6) -> 
     vector_enabled = bool(collection_name and embedding_client.available and model_matches)
     with ThreadPoolExecutor(max_workers=2, thread_name_prefix="rag-retrieve") as executor:
         keyword_future = executor.submit(
-            keyword_search_documents,
+            bm25_search_documents,
             query,
             collection_name,
             anime_id=anime_id,
@@ -105,6 +105,7 @@ def search_evidence(query: str, anime_id: int | None = None, top_k: int = 6) -> 
         "vector_error_type": vector_error_type,
         "vector_error": vector_error,
         "fusion_method": "rrf",
+        "keyword_retriever": "bm25",
         "rerank_applied": rerank_applied,
         "rerank_fallback_reason": "" if rerank_applied else "reranker_failed" if reranker.available else "reranker_not_configured",
         "retrieval_counts": {
@@ -196,6 +197,7 @@ def _normalize_evidence(evidence: list[dict]) -> list[dict]:
             "rank": item.get("rank", idx),
             "source_label": item.get("source_label", ""),
             "rrf_score": item.get("rrf_score", 0),
+            "bm25_score": item.get("bm25_score"),
             "rerank_score": item.get("rerank_score"),
             "vector_rank": item.get("vector_rank"),
             "keyword_rank": item.get("keyword_rank"),

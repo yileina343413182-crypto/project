@@ -63,7 +63,7 @@
 
 - `backend/` 包含 FastAPI 应用和 API router。
 - `backend/agents/` 包含推荐/舆情 Agent、状态 Schema、工具、记忆和任务队列。
-- `backend/rag/` 包含 Embedding、Chroma、SQLite 关键词降级、索引和评测。
+- `backend/rag/` 包含 Embedding、Chroma、BM25 关键词降级、索引和评测。
 - `backend/prompts/` 包含不可变 Prompt Registry、active version 和模板哈希。
 - `frontend/` 包含 Vue 3 + Vite 可视化看板代码。
 - `data/` 包含原始、处理后和训练数据、SQLite 数据库及可重建的 Chroma
@@ -139,7 +139,7 @@
 - 保存模型路径：`models/saved/textcnn` 和 `models/saved/bert`。
 - `backend/config.py` 按 provider 读取 LLM/Embedding Key、Base URL 和模型配置。
 - 如果未配置 LLM Key 或调用失败，Agent 必须返回本地降级结果。
-- 如果 Embedding 或 Chroma 不可用，RAG 必须降级为 SQLite 关键词检索。
+- 如果 Embedding 或 Chroma 不可用，RAG 必须降级为 BM25 关键词检索。
 - `data/chroma/` 和 LangGraph Checkpoint 数据库属于可重建/运行时数据；
   不得与主业务数据库混同，也不得在未确认损坏时清理。
 

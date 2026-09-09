@@ -28,7 +28,7 @@ Agent 系统。前端统一从“智能体中心”进入，FastAPI 负责任务
 | **推荐上下文记忆** | 当前会话保留最近 8 条原始消息并增量摘要旧消息，跨会话使用带来源和置信度的结构化长期记忆；支持前端查看、修改和精确遗忘 |
 | **动画库与观看状态** | 推荐页可浏览全部动画并维护未看/在看/已看状态；候选生成只从未看作品中选择 |
 | **观看指南** | 可根据推荐结果生成并持久化番剧观看指南，支持当前用户分页查看、读取详情和删除 |
-| **混合 RAG** | Chroma 向量召回 + SQL 关键词召回 + RRF 融合 + 可选 qwen3-rerank，并在索引不可用时降级 |
+| **混合 RAG** | Chroma 向量召回 + BM25 关键词召回 + RRF 融合 + 可选 qwen3-rerank，并在索引不可用时降级 |
 | **可靠任务执行** | Redis + Celery 分队列执行，支持幂等请求、会话内串行、跨会话并行、SQL 租约、心跳、崩溃重投递和遗留任务恢复 |
 | **PromptOps 与安全** | Prompt 不可变版本、模板哈希、运行 Trace、输入/证据/工具结果注入防护及受限只读工具 |
 
@@ -125,7 +125,7 @@ Agent 生产运行与故障恢复见
 | **可视化看板** | 情感分布饼图、逐条情感趋势折线图、评论词云、LDA 主题卡片、评论列表（分页+情感过滤） | Vue 3 + ECharts 5 + echarts-wordcloud |
 | **用户系统** | 注册/登录、JWT Token 认证、bcrypt 密码哈希、聊天历史持久化 | PyJWT + bcrypt |
 | **Agent 中心** | 舆情诊断、多轮偏好推荐、跨进程并行、短期/长期记忆管理、动画库观看状态、会话/任务持久化、崩溃重投递幂等、执行步骤和证据追踪 | LangGraph + Celery + Redis |
-| **混合 RAG** | Chroma 向量召回与数据库关键词召回并行执行，RRF 融合后可选百炼 Rerank；索引不可用时降级到实时业务表 | Chroma + SQLAlchemy + qwen3-rerank |
+| **混合 RAG** | Chroma 向量召回与 BM25 关键词召回并行执行，RRF 融合后可选百炼 Rerank；索引不可用时降级到实时业务表 | Chroma + jieba + SQLAlchemy + qwen3-rerank |
 | **AI 推荐** | 保留传统单轮推荐；Agent 2.0 通过偏好问卷、候选池、受限只读工具和结构化校验生成可追溯推荐 | OpenAI 兼容接口（Qwen / OpenAI / 智谱） |
 | **REST API** | 统一 JSON 格式 `{"code":200,"msg":"...","data":{...}}`，完整的错误码体系 | FastAPI APIRouter |
 
@@ -602,14 +602,17 @@ Prompt 版本管理细节见
 `backend/rag/retriever.py` 在活动集合的 Embedding 元数据匹配时并行执行两路召回：
 
 1. Chroma 向量相似度召回。
-2. `rag_documents` 数据库关键词召回。
+2. 基于完整 `rag_documents` 语料构建的 Okapi BM25 关键词召回。
 3. 使用 RRF（Reciprocal Rank Fusion，默认 `k=60`）按 `doc_id` 去重融合。
 4. 配置百炼 Rerank 时，使用 `qwen3-rerank` 对融合候选精排。
 5. 向量或 Rerank 不可用时保留关键词/RRF 结果；索引整体不可用时继续从
    `comments`、`topics` 和情感汇总实时构造证据。
 
-检索响应会返回 `mode`、`retrieval_counts`、`rrf_score`、`rerank_score`、
-`vector_rank` 和 `keyword_rank` 等诊断字段。`rag_documents` 是关系数据库中的
+BM25 倒排索引按活动集合在进程内缓存；文档 upsert 提交后会立即失效本进程缓存，
+其他进程通过集合文档统计检测更新并在下一次查询时重建。
+
+检索响应会返回 `mode`、`keyword_retriever`、`retrieval_counts`、`bm25_score`、
+`rrf_score`、`rerank_score`、`vector_rank` 和 `keyword_rank` 等诊断字段。`rag_documents` 是关系数据库中的
 文档副本，不能替代 Chroma 实际向量计数；索引任务只有在向量数与文档数一致、
 抽样查询成功后才激活新集合。
 
@@ -889,7 +892,7 @@ $env:RECOMMEND_PROMPT_MAX_TOKENS="10000"
 ```
 
 未配置 LLM 或 Embedding Key 时，推荐与 RAG 分别降级为本地推荐和数据库
-关键词检索。未配置百炼 Rerank 或调用失败时，混合检索保留 RRF 融合顺序。
+BM25 关键词检索。未配置百炼 Rerank 或调用失败时，混合检索保留 RRF 融合顺序。
 启用百炼 Rerank 后，融合候选文本会发送到对应百炼业务空间进行精排。
 
 Agent 并发由推荐/舆情两个 Celery 队列的 Worker concurrency 控制；正式并发运行应使用
@@ -1141,7 +1144,7 @@ docker compose -f compose.agent.yml up -d
 | 情感模型 | TextCNN（自建）/ bert-base-chinese 微调 |
 | 爬虫 | requests + BeautifulSoup4 |
 | 安全 | bcrypt 密码哈希 + JWT 无状态认证 |
-| Agent / RAG | LangGraph + Chroma + 数据库关键词检索 + RRF + qwen3-rerank |
+| Agent / RAG | LangGraph + Chroma + BM25 关键词检索 + RRF + qwen3-rerank |
 | LLM 集成 | Qwen qwen3.7-plus / OpenAI / 智谱 GLM-4-Flash（OpenAI 兼容接口，自动降级） |
 
 ---

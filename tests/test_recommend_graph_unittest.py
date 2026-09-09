@@ -431,12 +431,14 @@ class RecommendationGraphTest(unittest.TestCase):
     def test_retrieval_evidence_preserves_hybrid_ranking_diagnostics(self):
         evidence = RetrievalEvidence(
             doc_id="comment:1",
+            bm25_score=4.2,
             rrf_score=0.125,
             rerank_score=0.91,
             vector_rank=2,
             keyword_rank=1,
         ).model_dump()
 
+        self.assertEqual(evidence["bm25_score"], 4.2)
         self.assertEqual(evidence["rrf_score"], 0.125)
         self.assertEqual(evidence["rerank_score"], 0.91)
         self.assertEqual(evidence["vector_rank"], 2)

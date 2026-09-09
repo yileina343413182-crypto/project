@@ -40,6 +40,7 @@ class RagIndexerVerificationTest(unittest.TestCase):
         )
 
         self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["mode"], "bm25_fallback")
         self.assertFalse(result["verified"])
         self.assertFalse(result["activated"])
         self.assertEqual(result["indexed_docs"], 2)

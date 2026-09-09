@@ -47,7 +47,7 @@ class HybridRetrieverTest(unittest.TestCase):
     @patch("backend.rag.retriever.get_collection_metadata")
     @patch("backend.rag.retriever.get_active_collection", return_value="active")
     @patch("backend.rag.retriever.BailianReranker")
-    @patch("backend.rag.retriever.keyword_search_documents")
+    @patch("backend.rag.retriever.bm25_search_documents")
     @patch("backend.rag.retriever.ChromaVectorStore")
     @patch("backend.rag.retriever.EmbeddingClient")
     def test_vector_and_keyword_run_concurrently_before_rerank(
@@ -88,6 +88,7 @@ class HybridRetrieverTest(unittest.TestCase):
         result = search_evidence("query", top_k=1)
 
         self.assertEqual(result["mode"], "hybrid")
+        self.assertEqual(result["keyword_retriever"], "bm25")
         self.assertFalse(result["fallback"])
         self.assertTrue(result["rerank_applied"])
         self.assertEqual(result["retrieval_counts"], {"vector": 2, "keyword": 2, "fused": 3})
@@ -99,7 +100,7 @@ class HybridRetrieverTest(unittest.TestCase):
     @patch("backend.rag.retriever.get_collection_metadata")
     @patch("backend.rag.retriever.get_active_collection", return_value="active")
     @patch("backend.rag.retriever.BailianReranker")
-    @patch("backend.rag.retriever.keyword_search_documents", return_value=[])
+    @patch("backend.rag.retriever.bm25_search_documents", return_value=[])
     @patch("backend.rag.retriever.ChromaVectorStore")
     @patch("backend.rag.retriever.EmbeddingClient")
     def test_only_top_twenty_fused_candidates_are_sent_to_reranker(
@@ -137,7 +138,7 @@ class HybridRetrieverTest(unittest.TestCase):
     @patch("backend.rag.retriever.get_collection_metadata", return_value=None)
     @patch("backend.rag.retriever.get_active_collection", return_value="active")
     @patch("backend.rag.retriever.BailianReranker")
-    @patch("backend.rag.retriever.keyword_search_documents", return_value=[_item("keyword", 0.7)])
+    @patch("backend.rag.retriever.bm25_search_documents", return_value=[_item("keyword", 0.7)])
     @patch("backend.rag.retriever.EmbeddingClient")
     def test_keyword_remains_available_without_vector_or_reranker(
         self,
@@ -161,7 +162,7 @@ class HybridRetrieverTest(unittest.TestCase):
     @patch("backend.rag.retriever.get_collection_metadata")
     @patch("backend.rag.retriever.get_active_collection", return_value="active")
     @patch("backend.rag.retriever.BailianReranker")
-    @patch("backend.rag.retriever.keyword_search_documents", return_value=[_item("keyword", 0.7)])
+    @patch("backend.rag.retriever.bm25_search_documents", return_value=[_item("keyword", 0.7)])
     @patch("backend.rag.retriever.ChromaVectorStore")
     @patch("backend.rag.retriever.EmbeddingClient")
     def test_vector_failure_is_visible_while_keyword_results_survive(

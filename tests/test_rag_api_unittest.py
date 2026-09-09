@@ -62,6 +62,7 @@ class RagApiSmokeTest(unittest.TestCase):
         self.assertEqual(search_resp.status_code, 200)
         data = search_resp.json()["data"]
         self.assertIn("mode", data)
+        self.assertEqual(data["keyword_retriever"], "bm25")
         self.assertIn("evidence", data)
 
     def test_rag_eval_api(self):
