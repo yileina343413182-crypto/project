@@ -50,7 +50,7 @@ task halfway through generation or repair.
 
 ## Current guarded versions
 
-- `recommendation@rag-v6-bounded-reasons`
+- `recommendation@rag-v10-citation-ownership`
 - `recommendation_followup@v1`
 - `watch_guide@v1`
 - `opinion_report@rag-v2-injection-guard`

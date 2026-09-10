@@ -67,7 +67,7 @@ def _plain_step(name, status, detail, started=None):
 
 def _validate_recommendation(data, candidates, evidence_map, required_count=None):
     """限制推荐数量、候选范围和证据归属，返回清洗结果及错误列表。"""
-    errors, seen = [], set(); allowed = {int(x["id"]): x for x in candidates}
+    errors, warnings, seen = [], [], set(); allowed = {int(x["id"]): x for x in candidates}
     recs = data.get("recommendations") or []
     if data.get("need_clarification"):
         if recs: errors.append("clarification must not include recommendations")
@@ -91,10 +91,12 @@ def _validate_recommendation(data, candidates, evidence_map, required_count=None
             errors.append(f"anime_id {aid} reason must not be empty")
         refs = {x.get("doc_id") or (x.get("metadata") or {}).get("doc_id") for x in evidence_map.get(aid, [])}
         requested = rec.get("evidence_refs") or []
-        if any(x not in refs for x in requested): errors.append(f"anime_id {aid} has foreign evidence")
+        if any(x not in refs for x in requested):
+            warnings.append(f"anime_id {aid} foreign evidence refs removed")
         rec["evidence_refs"] = [x for x in requested if x in refs]
     updates = data.get("preference_updates") if isinstance(data.get("preference_updates"), dict) else {}
     data["preference_updates"] = {k: (v if isinstance(v, list) else [v])[:10] for k,v in updates.items() if k in _PREF_FIELDS and v}
+    data["validation_warnings"] = warnings
     return data, errors
 
 def _structured(model, prompt, prompt_template=None):

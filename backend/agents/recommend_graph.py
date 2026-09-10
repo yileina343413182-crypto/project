@@ -990,14 +990,15 @@ def validate(state: AgentState) -> dict:
     )
     if data.get("need_clarification"):
         errors.append("preference questionnaire is already complete")
+    warnings = data.get("validation_warnings", [])
     return {
         "llm_data": data,
         "validation_errors": errors,
         "agent_steps": [
             plain_step(
                 "validate_recommendation",
-                "degraded" if errors else "success",
-                "; ".join(errors) or "valid",
+                "degraded" if errors or warnings else "success",
+                "; ".join([*errors, *warnings]) or "valid",
             )
         ],
     }
@@ -1113,7 +1114,7 @@ def finalize_success(state: AgentState) -> dict:
             ),
             "evidence_coverage": state.get("evidence_coverage", {}),
             "context_budget": state.get("context_budget", {}),
-            "validation_warnings": [],
+            "validation_warnings": data.get("validation_warnings", []),
             "preference_stage": "",
             "preference_progress": state.get("preference_progress", {}),
             "preference_updates": _preference_update_payload(

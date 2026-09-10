@@ -555,7 +555,7 @@ class RecommendationGraphTest(unittest.TestCase):
             list(QUESTIONNAIRE_SLOTS),
         )
 
-    def test_valid_llm_result_passes_through_validate_and_success_nodes(self):
+    def test_foreign_evidence_ref_is_sanitized_without_local_fallback(self):
         for slot in QUESTIONNAIRE_SLOTS:
             self.preferences[slot] = [f"value-{slot}"]
         response = {
@@ -566,7 +566,7 @@ class RecommendationGraphTest(unittest.TestCase):
                     "anime_id": 1,
                     "reason": "理" * RECOMMEND_REASON_MIN_CHARS,
                     "match_tags": ["匹配"],
-                    "evidence_refs": [],
+                    "evidence_refs": ["anime:999:comment:1"],
                 }
             ],
             "preference_updates": {},
@@ -638,6 +638,14 @@ class RecommendationGraphTest(unittest.TestCase):
             recommendation["evidence"]["comments"][0]["content"],
             "角色成长自然",
         )
+        self.assertEqual(
+            recommendation["evidence_refs"],
+            ["anime:1:comment:1"],
+        )
+        self.assertEqual(
+            payload["result"]["validation_warnings"],
+            ["anime_id 1 foreign evidence refs removed"],
+        )
         preference_updates = payload["result"]["preference_updates"]
         self.assertEqual(preference_updates["applied"], {})
         self.assertEqual(preference_updates["last_query"], "继续推荐")
@@ -647,7 +655,7 @@ class RecommendationGraphTest(unittest.TestCase):
         )
         self.assertEqual(
             payload["result"]["prompt_trace"]["template_version"],
-            "rag-v9-context-memory",
+            "rag-v10-citation-ownership",
         )
         self.assertEqual(
             len(payload["result"]["prompt_trace"]["template_hash"]),

@@ -26,6 +26,7 @@ prompts:
       rag-v7-tool-bounded: 5f9f93b578687b5fd8a98357c6344221bce7ec5ffbcb6613b2bb5aefc6886993
       rag-v8-soft-reason-length: 615bd46c11e3865fb99de1dc92ef5a55a0d515e3ffaadf4e00b44a0015308865
       rag-v9-context-memory: 6b62034ebb2e9b0072f50f0b26b50bd6f6d81d04244b230fadfb8b38ca487db1
+      rag-v10-citation-ownership: 18b43b6aa072bf0f620edd32882100c8656f67f00bde15046ef7eeaa3cd13123
   recommendation_chat:
     versions:
       v1: f3c93110a73182f7f0dcbafa64ccfb8166021961162f26ce77eaab1915b0d5b4

@@ -4,7 +4,7 @@ active_versions:
   anime_description_search: v1
   evidence_answering: rag-v1
   opinion_report: rag-v2-injection-guard
-  recommendation: rag-v9-context-memory
+  recommendation: rag-v10-citation-ownership
   recommendation_chat: v2-context-memory
   recommendation_followup: v2-context-memory
   recommendation_image: v1

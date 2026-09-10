@@ -36,7 +36,7 @@ class PromptRegistryTest(unittest.TestCase):
             prompt.version,
             active_versions["recommendation"],
         )
-        self.assertEqual(prompt.version, "rag-v9-context-memory")
+        self.assertEqual(prompt.version, "rag-v10-citation-ownership")
         self.assertEqual(len(prompt.template_hash), 64)
 
     def test_historical_prompt_version_remains_addressable(self):

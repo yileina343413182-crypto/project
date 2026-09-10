@@ -133,7 +133,10 @@ class LLMAnimeRecommendation(BaseModel):
     anime_id: int
     reason: str = Field(description=RECOMMEND_REASON_DESCRIPTION)
     match_tags: list[str] = Field(default_factory=list)
-    evidence_refs: list[str] = Field(default_factory=list)
+    evidence_refs: list[str] = Field(
+        default_factory=list,
+        description="Only doc_id values from evidence belonging to this anime_id",
+    )
 
 
 class LLMRecommendationResponse(BaseModel):
